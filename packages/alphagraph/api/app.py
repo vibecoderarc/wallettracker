@@ -7,10 +7,11 @@ submits a transaction, and there must never be one.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
@@ -44,10 +45,39 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=get_settings().cors_origin_list,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+def require_token(authorization: str = Header(default="")) -> None:
+    """Bearer-token gate on every endpoint except /v1/health.
+
+    Compared with `secrets.compare_digest` so a wrong token cannot be recovered
+    by timing the response.
+
+    When no token is configured the gate is open — that is only reachable in
+    local development, because `Settings` refuses to start without one in any
+    other environment.
+    """
+    settings = get_settings()
+    if not settings.auth_required:
+        return
+    scheme, _, presented = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not presented:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not secrets.compare_digest(presented, settings.api_token):
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+
+#: Applied to every route below. Health is declared before this is used and is
+#: deliberately left open so platform health checks work without a secret.
+protected = [Depends(require_token)]
 
 DISCLAIMER = (
     "Research tool. Public data only. Not investment advice, and no guarantee of "
@@ -85,7 +115,7 @@ def health(db: Session = Depends(get_db)) -> dict:
     return {"status": "ok", "run_mode": get_settings().run_mode.value}
 
 
-@app.get("/v1/system/coverage")
+@app.get("/v1/system/coverage", dependencies=protected)
 def coverage(db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     latest = (
@@ -115,7 +145,7 @@ def coverage(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@app.get("/v1/system/base-rates")
+@app.get("/v1/system/base-rates", dependencies=protected)
 def base_rates(db: Session = Depends(get_db)) -> dict:
     """Population base rates — the denominator for every claim in the UI."""
     registry = OutcomeRegistry(db)
@@ -156,7 +186,7 @@ SIGNAL_FIELDS = [
 ]
 
 
-@app.get("/v1/signals")
+@app.get("/v1/signals", dependencies=protected)
 def list_signals(
     db: Session = Depends(get_db),
     limit: int = Query(50, le=200),
@@ -170,7 +200,7 @@ def list_signals(
     return {"signals": [_serialize(r, SIGNAL_FIELDS) for r in rows], "disclaimer": DISCLAIMER}
 
 
-@app.get("/v1/signals/{signal_id}")
+@app.get("/v1/signals/{signal_id}", dependencies=protected)
 def get_signal(signal_id: int, db: Session = Depends(get_db)) -> dict:
     row = db.get(SignalRow, signal_id)
     if row is None:
@@ -220,7 +250,7 @@ CANDIDATE_FIELDS = [
 ]
 
 
-@app.get("/v1/candidates")
+@app.get("/v1/candidates", dependencies=protected)
 def list_candidates(
     db: Session = Depends(get_db),
     status: str | None = None,
@@ -233,7 +263,7 @@ def list_candidates(
     return {"candidates": [_serialize(r, CANDIDATE_FIELDS) for r in rows]}
 
 
-@app.get("/v1/wallets/{wallet}")
+@app.get("/v1/wallets/{wallet}", dependencies=protected)
 def wallet_profile(wallet: str, db: Session = Depends(get_db)) -> dict:
     as_of = db.execute(select(func.max(Event.observed_at))).scalar_one_or_none()
     if as_of is None:
@@ -279,7 +309,7 @@ def wallet_profile(wallet: str, db: Session = Depends(get_db)) -> dict:
 # ------------------------------------------------------------------ assets
 
 
-@app.get("/v1/assets/{asset_id}")
+@app.get("/v1/assets/{asset_id}", dependencies=protected)
 def asset_page(asset_id: str, db: Session = Depends(get_db)) -> dict:
     asset = db.get(Asset, asset_id)
     if asset is None:
@@ -341,7 +371,7 @@ def asset_page(asset_id: str, db: Session = Depends(get_db)) -> dict:
 # ---------------------------------------------------------------- entities
 
 
-@app.get("/v1/entities")
+@app.get("/v1/entities", dependencies=protected)
 def list_entities(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(Entity)).scalars().all()
     return {
@@ -357,7 +387,7 @@ def list_entities(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@app.get("/v1/entities/{entity_id}")
+@app.get("/v1/entities/{entity_id}", dependencies=protected)
 def entity_dossier(entity_id: str, db: Session = Depends(get_db)) -> dict:
     entity = db.get(Entity, entity_id)
     if entity is None:
@@ -387,7 +417,7 @@ class NoteIn(BaseModel):
     kind: str = "note"
 
 
-@app.post("/v1/entities/{entity_id}/notes")
+@app.post("/v1/entities/{entity_id}/notes", dependencies=protected)
 def add_note(entity_id: str, note: NoteIn, db: Session = Depends(get_db)) -> dict:
     if db.get(Entity, entity_id) is None:
         raise HTTPException(404, "entity not found")
@@ -396,7 +426,7 @@ def add_note(entity_id: str, note: NoteIn, db: Session = Depends(get_db)) -> dic
     return _serialize(created, ["id", "author", "kind", "body", "created_at"])
 
 
-@app.get("/v1/graph/neighborhood")
+@app.get("/v1/graph/neighborhood", dependencies=protected)
 def neighborhood(
     wallet: str,
     depth: int = Query(1, ge=1, le=3),
@@ -430,7 +460,7 @@ def neighborhood(
 # ------------------------------------------------------- proposals / digest
 
 
-@app.get("/v1/proposals")
+@app.get("/v1/proposals", dependencies=protected)
 def list_proposals(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(Proposal).order_by(desc(Proposal.created_at))).scalars().all()
     return {
@@ -458,7 +488,7 @@ def list_proposals(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@app.post("/v1/proposals/{proposal_id}/approve")
+@app.post("/v1/proposals/{proposal_id}/approve", dependencies=protected)
 def approve_proposal(proposal_id: int, db: Session = Depends(get_db)) -> dict:
     proposal = db.get(Proposal, proposal_id)
     if proposal is None:
@@ -472,7 +502,7 @@ def approve_proposal(proposal_id: int, db: Session = Depends(get_db)) -> dict:
     return {"status": "approved", "id": proposal_id}
 
 
-@app.get("/v1/digests")
+@app.get("/v1/digests", dependencies=protected)
 def digests(db: Session = Depends(get_db), limit: int = Query(14, le=90)) -> dict:
     rows = db.execute(select(Digest).order_by(desc(Digest.run_date)).limit(limit)).scalars().all()
     return {"digests": [{"run_date": d.run_date.isoformat(), "body": d.body} for d in rows]}
@@ -491,7 +521,7 @@ class PaperOrderIn(BaseModel):
     notes: str = ""
 
 
-@app.post("/v1/paper/orders")
+@app.post("/v1/paper/orders", dependencies=protected)
 def create_paper_position(order: PaperOrderIn, db: Session = Depends(get_db)) -> dict:
     """Simulated only. This endpoint cannot and must not reach an exchange."""
     from decimal import Decimal
@@ -517,7 +547,7 @@ def create_paper_position(order: PaperOrderIn, db: Session = Depends(get_db)) ->
     }
 
 
-@app.get("/v1/paper/portfolio")
+@app.get("/v1/paper/portfolio", dependencies=protected)
 def paper_portfolio(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(PaperPosition).order_by(desc(PaperPosition.opened_at))).scalars().all()
     return {

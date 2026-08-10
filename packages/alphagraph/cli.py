@@ -259,15 +259,31 @@ def digest() -> None:
 
 @app.command()
 def serve(host: str = "", port: int = 0) -> None:
-    """Start the API server."""
+    """Start the API server.
+
+    Honours $PORT, which PaaS platforms assign at runtime, and binds 0.0.0.0
+    when one is set — a platform-assigned port always implies the process must
+    be reachable from outside its own container.
+    """
+    import os
+
     import uvicorn
 
     settings = get_settings()
+    platform_port = os.environ.get("PORT")
+    resolved_port = port or (int(platform_port) if platform_port else settings.api_port)
+    resolved_host = host or ("0.0.0.0" if platform_port else settings.api_host)
+
     create_all()
+    if not settings.auth_required:
+        console.print(
+            "[yellow]No API token configured — every endpoint is open. "
+            "Acceptable locally; Settings refuses to start this way anywhere else.[/yellow]"
+        )
     uvicorn.run(
         "alphagraph.api.app:app",
-        host=host or settings.api_host,
-        port=port or settings.api_port,
+        host=resolved_host,
+        port=resolved_port,
         reload=False,
     )
 

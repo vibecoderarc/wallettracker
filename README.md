@@ -105,8 +105,8 @@ Precision by signal family:
   • silent_accumulation:       1.5% (32/2151)   ← noise, and it says so
 ```
 
-97 tests pass, including look-ahead, determinism, independence, phishing-safety, and
-product-boundary checks.
+126 tests pass, including look-ahead, determinism, independence, phishing-safety,
+authentication, and product-boundary checks.
 
 ---
 
@@ -119,6 +119,11 @@ This is enforced by tests, not convention — `TestProductBoundary` greps the so
 handling and transaction submission and fails CI if either appears. Shadow mode is the
 default, and notifications require *both* `run_mode=live_alerts` and a configured
 destination.
+
+Every API endpoint except `/v1/health` requires a bearer token, and the service **refuses
+to start** without one outside local development. Everything the system produces — tracked
+wallets, dossier notes, the hypotheses behind them — is the product, and an unauthenticated
+public hostname gives it away to whoever finds it.
 
 The system detects coordinated pump activity and reports operator statistics. It will not
 coordinate, promote, or amplify one, and reads only public data.
@@ -141,6 +146,7 @@ integration time and record the choice as an ADR.
 ## Reading order
 
 - [`ALPHAGRAPH_SPEC.md`](./ALPHAGRAPH_SPEC.md) — source of truth
+- [`docs/DEPLOY.md`](./docs/DEPLOY.md) — deploying to Render
 - [`docs/adr/`](./docs/adr) — why the non-obvious decisions were made
 - [`packages/alphagraph/discovery/engine.py`](./packages/alphagraph/discovery/engine.py) — the core loop
 - [`packages/alphagraph/wallets/metrics.py`](./packages/alphagraph/wallets/metrics.py) — "clicks less", as arithmetic
