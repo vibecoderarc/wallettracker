@@ -16,10 +16,29 @@ _engine: Engine | None = None
 _factory: sessionmaker[Session] | None = None
 
 
+def normalize_database_url(url: str) -> str:
+    """Point Postgres URLs at psycopg v3, the driver this project installs.
+
+    Hosting platforms hand out a bare `postgresql://` (or the legacy
+    `postgres://`) connection string. SQLAlchemy resolves both to **psycopg2**,
+    which is not installed here — the failure is a ModuleNotFoundError at engine
+    creation, long after the config looked fine.
+
+    Rewriting the scheme is the whole fix. URLs that already name a driver
+    (`postgresql+psycopg://`, `postgresql+asyncpg://`) are left alone, as is
+    SQLite.
+    """
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 def get_engine(url: str | None = None, echo: bool = False) -> Engine:
     global _engine, _factory
     if _engine is None or url is not None:
-        target = url or get_settings().database_url
+        target = normalize_database_url(url or get_settings().database_url)
         connect_args = {"check_same_thread": False} if target.startswith("sqlite") else {}
         _engine = create_engine(target, echo=echo, future=True, connect_args=connect_args)
         if target.startswith("sqlite"):
