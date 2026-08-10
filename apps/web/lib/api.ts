@@ -5,7 +5,22 @@
  * and a stale cached page that looks current is worse than a slow one.
  */
 
-const BASE = process.env.ALPHAGRAPH_API_URL ?? "http://127.0.0.1:8000";
+/**
+ * Base URL of the API.
+ *
+ * Render's `fromService` env vars yield a bare `host` or `host:port` with no
+ * scheme, and `fetch` rejects a URL without one. Rather than depend on whoever
+ * sets the variable remembering to prefix it, normalise here: add https:// when
+ * a scheme is missing, except for localhost, which is plain http in development.
+ */
+function normalizeBase(raw: string): string {
+  const value = raw.trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(value)) return value;
+  const isLocal = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|$)/i.test(value);
+  return `${isLocal ? "http" : "https"}://${value}`;
+}
+
+const BASE = normalizeBase(process.env.ALPHAGRAPH_API_URL ?? "http://127.0.0.1:8000");
 
 /**
  * Read WITHOUT the NEXT_PUBLIC_ prefix, deliberately.

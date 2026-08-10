@@ -16,8 +16,14 @@ export default async function Discovery() {
     );
   }
 
+  // "Awaiting review" means a wallet that passed the guards and is waiting on
+  // you. Rejected wallets are recorded for auditability but belong in the
+  // rejected section below — listing them here would present excluded bots as
+  // things to consider.
   const pending = candidates.candidates
-    .filter((c) => !["tracked", "retired"].includes(c.status))
+    .filter(
+      (c) => !["tracked", "retired", "rejected"].includes(c.status) && !c.rejection_reason,
+    )
     .sort((a, b) => b.edge_vs_base - a.edge_vs_base);
   const rejected = candidates.candidates.filter((c) => c.rejection_reason);
 

@@ -123,12 +123,13 @@ class AlertDispatcher:
 
         for signal in signals[: self.policy.max_per_run]:
             key = signal.dedupe_key()
-            if (
-                self.session.get(SignalRow, key) is not None
-                or self.session.execute(
-                    select(SignalRow).where(SignalRow.dedupe_key == key)
-                ).scalar_one_or_none()
-            ):
+            # Look up by dedupe_key only. `session.get()` takes a PRIMARY KEY,
+            # and this table's primary key is an integer id — passing the string
+            # key made SQLite quietly return None while Postgres rejected the
+            # query outright.
+            if self.session.execute(
+                select(SignalRow).where(SignalRow.dedupe_key == key)
+            ).scalar_one_or_none():
                 result.suppressed_duplicate += 1
                 continue
 
