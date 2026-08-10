@@ -131,6 +131,27 @@ def _serialize(row: Any, fields: list[str]) -> dict:
 # ------------------------------------------------------------------- system
 
 
+@app.get("/")
+def root() -> dict:
+    """Signpost for anyone who opens the engine's URL expecting the dashboard.
+
+    Left unauthenticated and deliberately free of any detail about the system's
+    state — it says what this service is and where the UI lives, nothing more.
+    Without it the root returns a bare "Not Found", which reads like a broken
+    deploy when the service is in fact working correctly.
+    """
+    return {
+        "service": "alphagraph-api",
+        "status": "ok",
+        "message": (
+            "This is the AlphaGraph engine, not the dashboard. It has no web UI. "
+            "Open the alphagraph-web service URL to view the dashboard."
+        ),
+        "health": "/v1/health",
+        "docs": "/docs",
+    }
+
+
 @app.get("/v1/health")
 def health(db: Session = Depends(get_db)) -> dict:
     """Deliberately reveals no configuration detail."""
