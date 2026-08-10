@@ -19,10 +19,12 @@ everything in one go. You should not need to click through service creation by h
    leave the provider credentials blank — the system runs on fixtures and says so
    on the System screen rather than pretending to have data.
 3. Deploy. The API comes up first; the web service waits on it for its URL.
-4. Once Render assigns the web service a hostname, set
-   `ALPHAGRAPH_CORS_ORIGINS` on **alphagraph-api** to that exact URL
-   (`https://alphagraph-web.onrender.com`, no trailing slash) and redeploy the API.
-5. Seed some data so the dashboard is not empty — see below.
+4. Seed some data so the dashboard is not empty — see below.
+
+You do **not** need to configure CORS. Every dashboard page is a server
+component, so its calls to the API happen server-to-server inside Render and
+never involve a browser origin. `ALPHAGRAPH_CORS_ORIGINS` matters only if you
+later add something that calls the API directly from the browser.
 
 ## The API token
 
@@ -46,15 +48,38 @@ curl -H "Authorization: Bearer $TOKEN" https://alphagraph-api.onrender.com/v1/ca
 
 ## Seeding data
 
-The database starts empty. To populate it from the fixture world, open a
-**Render Shell** on `alphagraph-api` and run:
+The database starts empty, so the dashboard comes up with empty states — "No
+signals yet", "No candidates pending" — rather than errors. That is working
+correctly; it just has nothing to show.
+
+To populate it from the fixture world, open a **Render Shell** on
+`alphagraph-api` and run:
 
 ```bash
 alphagraph demo
 ```
 
-Takes a few minutes and writes ~11k events, 429 assets, and the discovered
-candidates. After that the cron job keeps it moving.
+This writes ~11.5k events, 429 assets, five discovered candidates and ~2.2k
+replayed signals. It takes a couple of minutes on a laptop and noticeably longer
+on a Starter instance's shared CPU — expect five to fifteen minutes, and do not
+close the shell while it runs.
+
+Afterwards the dashboard has data on every screen and the nightly cron keeps it
+moving.
+
+## Postgres compatibility
+
+The full suite and the end-to-end demo have both been run against PostgreSQL 16,
+not only the SQLite used in development. That flushed out one real defect — a
+primary-key lookup that SQLite tolerated and Postgres rejected — which is fixed.
+
+If you change persistence code, run the suite against Postgres before deploying:
+
+```bash
+createdb alphagraph_pytest
+ALPHAGRAPH_TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost/alphagraph_pytest \
+  pytest -q
+```
 
 ## Schema management
 

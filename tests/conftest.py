@@ -23,9 +23,14 @@ def engine(world, tmp_path_factory):
     would make the suite too slow to run often, and a suite nobody runs catches
     nothing.
     """
-    path = tmp_path_factory.mktemp("db") / "test.db"
+    import os
+
+    url = os.environ.get("ALPHAGRAPH_TEST_DATABASE_URL")
+    if not url:
+        path = tmp_path_factory.mktemp("db") / "test.db"
+        url = f"sqlite+pysqlite:///{path}"
     reset_engine()
-    created = create_all(f"sqlite+pysqlite:///{path}")
+    created = create_all(url)
 
     session = get_session_factory()()
     asyncio.run(bootstrap(session, world, WORLD_END))
