@@ -8,6 +8,8 @@ submits a transaction, and there must never be one.
 from __future__ import annotations
 
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
@@ -37,10 +39,29 @@ from alphagraph.entities.graph import DossierService, GraphBuilder
 from alphagraph.outcomes.registry import OutcomeRegistry
 from alphagraph.wallets.metrics import WalletMetricsCalculator
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Fill an empty database in the background on first boot.
+
+    Threaded rather than awaited: the health check must pass immediately or the
+    platform considers the deploy failed while seeding is still running. The
+    dashboard stays reachable throughout and shows empty states until data
+    lands.
+    """
+    import threading
+
+    from alphagraph.seed import seed_if_empty_blocking
+
+    threading.Thread(target=seed_if_empty_blocking, name="auto-seed", daemon=True).start()
+    yield
+
+
 app = FastAPI(
     title="AlphaGraph",
     version="0.1.0",
     description="Insider footprint intelligence. Research only — not investment advice.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -78,6 +99,7 @@ def require_token(authorization: str = Header(default="")) -> None:
 #: Applied to every route below. Health is declared before this is used and is
 #: deliberately left open so platform health checks work without a secret.
 protected = [Depends(require_token)]
+
 
 DISCLAIMER = (
     "Research tool. Public data only. Not investment advice, and no guarantee of "

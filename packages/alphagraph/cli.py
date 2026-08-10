@@ -37,18 +37,21 @@ def demo(database: str = typer.Option("", help="SQLAlchemy URL; defaults to conf
     world = build_world()
 
     async def run() -> None:
-        from alphagraph.entities.graph import DossierService, GraphBuilder
-        from alphagraph.pipeline import bootstrap
-        from alphagraph.playbooks.engine import PlaybookEngine
+        from sqlalchemy import select
+
+        from alphagraph.backtest.engine import Backtester
+        from alphagraph.db.models import Candidate
+        from alphagraph.nightly.loop import NightlyLoop, render_digest
         from alphagraph.providers.fixture import (
             FixtureMarketDataProvider,
             RecordingNotificationProvider,
         )
-        from alphagraph.signals.policy import AlertDispatcher
+        from alphagraph.seed import seed_demo
+        from alphagraph.signals.policy import AlertDispatcher, AlertPolicy
 
         with session_scope() as session:
-            console.print("[bold]1. Ingest + outcomes + discovery[/bold]")
-            result = await bootstrap(session, world)
+            console.print("[bold]1. Ingest, outcomes, discovery, graph, signals[/bold]")
+            result = await seed_demo(session, world)
             console.print(result.summary())
 
             handles = {spec.address: name for name, spec in world.wallets.items()}
@@ -64,12 +67,8 @@ def demo(database: str = typer.Option("", help="SQLAlchemy URL; defaults to conf
                 "edge",
             ):
                 table.add_column(column)
-            from sqlalchemy import select
-
-            from alphagraph.db.models import Candidate
-
             for candidate in session.execute(
-                select(Candidate).order_by(Candidate.edge_vs_base.desc())
+                select(Candidate).order_by(Candidate.edge_vs_base.desc()).limit(12)
             ).scalars():
                 table.add_row(
                     candidate.wallet[:10] + "…",
@@ -82,91 +81,28 @@ def demo(database: str = typer.Option("", help="SQLAlchemy URL; defaults to conf
                     f"{float(candidate.edge_vs_base):.1f}x",
                 )
             console.print(table)
+            if result.playbook_stages:
+                console.print(f"playbook: {' → '.join(result.playbook_stages)}")
 
-            console.print("\n[bold]2. Promote to tracked, build graph and dossiers[/bold]")
-            from alphagraph.discovery.engine import CandidateStatus, DiscoveryEngine
-
-            engine = DiscoveryEngine(session)
-            engine.advance_lifecycle(WORLD_END)
-            # Fast-forward past the shadow period so the demo shows live signals.
-            engine.advance_lifecycle(WORLD_END + timedelta(days=31))
-
-            tracked = [
-                c.wallet
-                for c in session.execute(select(Candidate)).scalars()
-                if c.status == CandidateStatus.TRACKED
-            ]
-            builder = GraphBuilder(session)
-            edges = builder.build_edges(tracked, WORLD_END)
-            console.print(f"graph edges: {builder.persist_edges(edges)}")
-
-            dossiers = DossierService(session)
-            primary = world.wallet("insider_listing")
-            side = world.wallet("side_wallet")
-            entity = dossiers.create(
-                "ent_listing_ring",
-                "Listing ring (primary + side wallet)",
-                [primary, side],
-                archetype="listing_predictor",
-                summary="Probes small, aborts, rests a bid, then sizes in. Side wallet confirms.",
-                method="co_acquisition_sequence",
-            )
-            dossiers.add_note(
-                entity.id,
-                "Unprofitable overall but 8/8 on listings. Track the sequence, not the P&L.",
-                kind="hypothesis",
-            )
-
-            playbooks = PlaybookEngine(session)
-            sequences = playbooks.mine(entity.id, [primary, side], WORLD_END)
-            playbook = playbooks.build_playbook(entity.id, sequences)
-            if playbook:
-                console.print(
-                    f"playbook: {' → '.join(playbook.stages)} "
-                    f"({playbook.supporting_sequences} sequences, "
-                    f"{playbook.aborted_sequences} aborted)"
-                )
-            else:
-                console.print("[yellow]playbook withheld: too few completed sequences[/yellow]")
-
-            console.print("\n[bold]3. Signals (point-in-time replay)[/bold]")
-            from alphagraph.backtest.engine import Backtester, replay_signals
-            from alphagraph.signals.policy import AlertPolicy
-
-            # Replay the clock rather than computing signals once at WORLD_END,
-            # which would use the whole history to decide what fired in the past.
-            signals = replay_signals(session, WORLD_START, WORLD_END, timedelta(days=5))
-            console.print(f"signals fired across the window: {len(signals)}")
-
-            notifier = RecordingNotificationProvider()
-            # A historical backfill legitimately persists everything; the small
-            # per-run cap exists to stop live alert floods, not replays.
-            dispatcher = AlertDispatcher(
-                session, notifier, AlertPolicy(max_per_run=len(signals) + 10)
-            )
-            dispatch = await dispatcher.dispatch(signals)
-            console.print(dispatch.as_dict())
-            for signal in sorted(signals, key=lambda s: s.significance, reverse=True)[:5]:
-                console.print(f"  • [{signal.family}] {signal.title}")
-                for fact in signal.supporting_facts[:2]:
-                    console.print(f"      - {fact}")
-
-            console.print("\n[bold]4. Backtest with baselines[/bold]")
+            console.print("\n[bold]2. Backtest with baselines[/bold]")
             market = FixtureMarketDataProvider(world)
             backtester = Backtester(session, market)
-            entries = [(s.asset_id, s.triggered_at) for s in signals if s.asset_id]
-            run = await backtester.run("demo_signals", entries, WORLD_START, WORLD_END)
+            from alphagraph.backtest.engine import replay_signals
+
+            replayed = replay_signals(session, WORLD_START, WORLD_END, timedelta(days=5))
+            entries = [(s.asset_id, s.triggered_at) for s in replayed if s.asset_id]
+            run_row = await backtester.run("demo_signals", entries, WORLD_START, WORLD_END)
             baseline = await backtester.random_baseline(len(entries) or 20, WORLD_START, WORLD_END)
-            console.print(f"strategy: {run.metrics}")
+            console.print(f"strategy: {run_row.metrics}")
             console.print(f"baseline: {baseline.as_dict()}")
             console.print(
-                f"leakage audit: {'PASSED' if run.leakage_audit_passed else 'FAILED'} "
-                f"{run.leakage_audit_detail}"
+                f"leakage audit: {'PASSED' if run_row.leakage_audit_passed else 'FAILED'}"
             )
 
-            console.print("\n[bold]5. Nightly loop[/bold]")
-            from alphagraph.nightly.loop import NightlyLoop, render_digest
-
+            console.print("\n[bold]3. Nightly loop[/bold]")
+            dispatcher = AlertDispatcher(
+                session, RecordingNotificationProvider(), AlertPolicy(max_per_run=500)
+            )
             loop = NightlyLoop(session, market, dispatcher)
             report = await loop.run(WORLD_END + timedelta(days=31))
             console.print(render_digest(report, session))

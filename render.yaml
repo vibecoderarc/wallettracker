@@ -46,6 +46,11 @@ services:
         value: shadow
       - key: ALPHAGRAPH_PROVIDER_MODE
         value: fixture
+      # Populate an empty database on first boot so the dashboard has data
+      # without anyone opening a shell. Only ever acts in fixture mode, and only
+      # when there are no events, so it cannot overwrite anything.
+      - key: ALPHAGRAPH_AUTO_SEED
+        value: "true"
       # Only needed if something calls the API *from a browser*. The dashboard
       # does not: every page is a server component, so its fetches are
       # server-to-server and never trigger CORS. Set this only if you add a
@@ -117,3 +122,7 @@ services:
         value: shadow
       - key: ALPHAGRAPH_PROVIDER_MODE
         value: fixture
+      # The API owns seeding. Two processes seeding the same database
+      # concurrently would race on a fresh deploy.
+      - key: ALPHAGRAPH_AUTO_SEED
+        value: "false"
