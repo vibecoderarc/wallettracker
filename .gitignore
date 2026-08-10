@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+.env
+*.db
+*.sqlite
+
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+.DS_Store
+
+# Generated fixture world — rebuild with alphagraph.providers.world.write_fixtures
+fixtures/*.json
