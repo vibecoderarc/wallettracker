@@ -5,17 +5,35 @@
  * and a stale cached page that looks current is worse than a slow one.
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+const BASE = process.env.ALPHAGRAPH_API_URL ?? "http://127.0.0.1:8000";
+
+/**
+ * Read WITHOUT the NEXT_PUBLIC_ prefix, deliberately.
+ *
+ * Next.js inlines NEXT_PUBLIC_ variables into the client bundle, so naming the
+ * token that way would ship it to every visitor's browser — the exact leak the
+ * API token exists to prevent. Every page here is a server component, so the
+ * fetch runs server-side and the token never crosses to the client.
+ */
+const TOKEN = process.env.ALPHAGRAPH_API_TOKEN ?? "";
 
 export class ApiUnavailable extends Error {}
 
 async function get<T>(path: string): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, { cache: "no-store" });
+    response = await fetch(`${BASE}${path}`, {
+      cache: "no-store",
+      headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
+    });
   } catch {
     throw new ApiUnavailable(
       `Cannot reach the AlphaGraph API at ${BASE}. Start it with \`alphagraph serve\`.`,
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new ApiUnavailable(
+      "API rejected the token. Check ALPHAGRAPH_API_TOKEN matches the API service.",
     );
   }
   if (!response.ok) {

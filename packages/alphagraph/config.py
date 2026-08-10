@@ -65,12 +65,26 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
 
+    #: Bearer token required on every endpoint except /v1/health. Empty is only
+    #: tolerated when `environment` is local — see the validator below.
+    api_token: str = ""
+    #: Comma-separated browser origins permitted to call the API.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
     @field_validator("fixture_dir")
     @classmethod
     def _fixture_dir_exists(cls, v: Path) -> Path:
         if not v.exists():
             raise ValueError(f"fixture_dir does not exist: {v}")
         return v
+
+    @property
+    def is_local(self) -> bool:
+        return self.environment.lower() in {"local", "test", "dev", "development"}
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def _live_mode_requires_credentials(self) -> Settings:
@@ -80,6 +94,26 @@ class Settings(BaseSettings):
                 "Refusing to start in live mode without a configured chain provider."
             )
         return self
+
+    @model_validator(mode="after")
+    def _deployed_requires_api_token(self) -> Settings:
+        """A deployed instance must not be readable by whoever finds the URL.
+
+        Everything this system produces — tracked wallets, dossier notes, the
+        hypotheses behind them — is the product. An unauthenticated public
+        hostname gives it all away, so refuse to boot rather than start quietly
+        wide open.
+        """
+        if not self.is_local and not self.api_token:
+            raise ValueError(
+                f"ALPHAGRAPH_API_TOKEN is required when environment={self.environment!r}. "
+                "Refusing to start an unauthenticated API outside local development."
+            )
+        return self
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self.api_token)
 
     @property
     def notifications_enabled(self) -> bool:

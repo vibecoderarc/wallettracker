@@ -1,0 +1,114 @@
+# Render blueprint. Create via Render → New → Blueprint, pointing at this repo.
+#
+# Three services and a database:
+#   alphagraph-api   FastAPI, the only thing that touches Postgres
+#   alphagraph-web   Next.js dashboard, talks to the API over HTTP
+#   alphagraph-nightly  cron job running the evaluation loop
+#
+# Secrets are NEVER in this file. Anything marked `sync: false` must be entered
+# in the Render dashboard; anything with `generateValue: true` Render creates
+# for you and you never see or need.
+
+databases:
+  - name: alphagraph-db
+    databaseName: alphagraph
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+
+services:
+  # ------------------------------------------------------------------- API
+  - type: web
+    name: alphagraph-api
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -e ".[postgres]"
+    startCommand: alphagraph serve
+    healthCheckPath: /v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Anything other than "local" makes the API token mandatory — Settings
+      # refuses to boot without one rather than starting wide open.
+      - key: ALPHAGRAPH_ENVIRONMENT
+        value: production
+      # Render generates this and injects the same value into the web service
+      # below, so the two always agree without you handling the secret.
+      - key: ALPHAGRAPH_API_TOKEN
+        generateValue: true
+      - key: ALPHAGRAPH_DATABASE_URL
+        fromDatabase:
+          name: alphagraph-db
+          property: connectionString
+      # Shadow mode: everything computes, nothing is sent. Flip to live_alerts
+      # only after reviewing shadow output, and only with a destination set.
+      - key: ALPHAGRAPH_RUN_MODE
+        value: shadow
+      - key: ALPHAGRAPH_PROVIDER_MODE
+        value: fixture
+      # Browser origin allowed to call the API. Set to your web service URL
+      # once Render assigns it.
+      - key: ALPHAGRAPH_CORS_ORIGINS
+        sync: false
+      # Provider credentials — add when moving off fixtures.
+      - key: ALPHAGRAPH_SOLANA_RPC_URL
+        sync: false
+      - key: ALPHAGRAPH_MARKET_DATA_KEY
+        sync: false
+      - key: ALPHAGRAPH_NOTIFICATION_WEBHOOK
+        sync: false
+
+  # ------------------------------------------------------------------- web
+  - type: web
+    name: alphagraph-web
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: apps/web
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: ALPHAGRAPH_API_URL
+        fromService:
+          name: alphagraph-api
+          type: web
+          property: hostport
+      # Same generated token as the API. Note the name has NO NEXT_PUBLIC_
+      # prefix — that would inline it into the browser bundle and hand the
+      # token to every visitor.
+      - key: ALPHAGRAPH_API_TOKEN
+        fromService:
+          name: alphagraph-api
+          type: web
+          envVarKey: ALPHAGRAPH_API_TOKEN
+
+  # ----------------------------------------------------------------- cron
+  - type: cron
+    name: alphagraph-nightly
+    runtime: python
+    plan: starter
+    region: oregon
+    # 07:00 UTC daily. Render cron is UTC — convert from your local time.
+    schedule: "0 7 * * *"
+    buildCommand: pip install -e ".[postgres]"
+    startCommand: alphagraph nightly
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ALPHAGRAPH_ENVIRONMENT
+        value: production
+      - key: ALPHAGRAPH_API_TOKEN
+        fromService:
+          name: alphagraph-api
+          type: web
+          envVarKey: ALPHAGRAPH_API_TOKEN
+      - key: ALPHAGRAPH_DATABASE_URL
+        fromDatabase:
+          name: alphagraph-db
+          property: connectionString
+      - key: ALPHAGRAPH_RUN_MODE
+        value: shadow
+      - key: ALPHAGRAPH_PROVIDER_MODE
+        value: fixture
