@@ -95,3 +95,29 @@ class TestTokenNeverReachesBrowser:
         source = (pathlib.Path(__file__).resolve().parents[1] / "apps/web/lib/api.ts").read_text()
         assert "NEXT_PUBLIC_API_TOKEN" not in source
         assert "process.env.ALPHAGRAPH_API_TOKEN" in source
+
+
+class TestRootSignpost:
+    """The engine's root must explain itself rather than return "Not Found".
+
+    A bare 404 at the root reads like a broken deploy, which is what it looked
+    like in practice when the service was working correctly.
+    """
+
+    def test_root_is_reachable_without_a_token(self, secured):
+        """It is a signpost, so it cannot require the credential it explains."""
+        response = secured.get("/")
+        assert response.status_code == 200
+
+    def test_root_points_at_the_dashboard(self, secured):
+        body = secured.get("/").json()
+        assert "dashboard" in body["message"].lower()
+        assert body["service"] == "alphagraph-api"
+
+    def test_root_leaks_no_state(self, secured):
+        """Unauthenticated, so it must not reveal anything about the data."""
+        body = secured.get("/").json()
+        assert set(body) == {"service", "status", "message", "health", "docs"}
+        serialized = str(body).lower()
+        for leaky in ("token", "database", "postgres", "wallet", "candidate"):
+            assert leaky not in serialized
