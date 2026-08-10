@@ -81,13 +81,17 @@ Discovered:  insider_listing (unprofitable, 8/8 on listings)   12.1× base rate
              insider_quiet   (6 trades/year, all ran hard)      6.9× base
              pump_operator   (flagged as operator, not alpha)   6.3× base
 
-Rejected (25): sniper_bot   — reaction_time_0.12s_below_human_threshold
-               churner      — churn_121.5_trades_per_month
-               lucky_wallet — too_few_events:3<4
+Rejected (38): sniper_bot   — entered_within_30s_of_launch_10_times
+               churner      — active_around_the_clock (428 assets touched)
+               lucky_wallet — sample_size_3_below_minimum
 
-Backtest:      1,632 simulated trades, hit rate 25.7% vs random baseline 13.1%
+Backtest:      2,241 simulated trades, hit rate 22.1% vs random baseline 14.9%
+               mean return +7.7% vs baseline −1.3%
 Leakage audit: PASSED (4 checks)
 ```
+
+The 25 closest rejections are persisted and shown in the UI. A discovery screen that
+only ever displays successes gives you no way to tell a working filter from a broken one.
 
 And the nightly loop grading its own output, which is where the system tells you
 uncomfortable things:
@@ -97,11 +101,11 @@ Precision by signal family:
   • sequence_confirmation:   100.0% (8/8)
   • resting_order_placed:    100.0% (8/8)
   • pump_operator_activity:  100.0% (5/5)
-  • tracked_entity_action:    91.8% (56/61)
-  • silent_accumulation:       1.7% (28/1669)   ← noise, and it says so
+  • tracked_entity_action:    92.2% (59/64)
+  • silent_accumulation:       1.5% (32/2151)   ← noise, and it says so
 ```
 
-90 tests pass, including look-ahead, determinism, independence, phishing-safety, and
+97 tests pass, including look-ahead, determinism, independence, phishing-safety, and
 product-boundary checks.
 
 ---
@@ -146,8 +150,8 @@ integration time and record the choice as an ADR.
 
 - **The fixture world encodes assumptions.** The planted archetypes come from one documented
   case study. Nothing here is validated against real chain data yet.
-- **`silent_accumulation` is badly calibrated.** It fires on 1,669 assets and hits 28 times
-  — a 1.7% precision against a 6.8% base rate, so it is currently *worse than random*. Its
+- **`silent_accumulation` is badly calibrated.** It fires 2,151 times and hits 32 — a 1.5%
+  precision against a 6.8% base rate, so it is currently *worse than random*. Its
   significance score (0.3 + 0.1 × buyers) is an arbitrary formula that has never been fitted
   to anything. It has deliberately not been hand-tuned to make the demo look better; the
   nightly digest reports it, and it should be recalibrated against real data or removed.

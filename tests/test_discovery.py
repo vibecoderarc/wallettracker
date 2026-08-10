@@ -146,3 +146,50 @@ def test_persisted_candidates_record_provenance(loaded_db):
             assert candidate.discovery_provenance, "a passing candidate must cite its outcomes"
             for entry in candidate.discovery_provenance:
                 assert {"outcome_id", "asset_id", "t0", "entered_at"} <= set(entry)
+
+
+class TestBotExclusion:
+    """Entry latency measures wallet behaviour, not our ingestion lag."""
+
+    def test_sniper_caught_by_entry_latency(self, loaded_db, world, as_of):
+        from alphagraph.wallets.metrics import Archetype, WalletMetricsCalculator
+
+        metrics = WalletMetricsCalculator(loaded_db).compute(world.wallet("sniper_bot"), as_of)
+        assert metrics.archetype == Archetype.BOT
+        assert metrics.sniper_entries >= 3
+        assert "within_30s_of_launch" in (metrics.excluded_reason or "")
+
+    @pytest.mark.parametrize(
+        "handle", ["insider_quiet", "insider_listing", "side_wallet", "revival_hunter"]
+    )
+    def test_humans_have_no_false_sniper_entries(self, loaded_db, world, as_of, handle):
+        """A false sniper count would misclassify a real find as infrastructure."""
+        from alphagraph.wallets.metrics import WalletMetricsCalculator
+
+        metrics = WalletMetricsCalculator(loaded_db).compute(world.wallet(handle), as_of)
+        assert metrics.sniper_entries == 0
+        assert metrics.min_entry_latency_seconds is None or (
+            metrics.min_entry_latency_seconds > 3600
+        )
+
+    def test_latency_skipped_when_creation_was_never_ingested(self, loaded_db, as_of):
+        """Tokens created before the backfill window must not be scored.
+
+        Otherwise latency is measured against whatever event we happened to
+        ingest first, which understates it and manufactures sniper counts at
+        every backfill boundary.
+        """
+        from alphagraph.wallets.metrics import WalletMetricsCalculator
+
+        calculator = WalletMetricsCalculator(loaded_db)
+        assert calculator._creation_time("solana:NEVER_INGESTED") is None
+
+    def test_rejections_are_recorded_for_audit(self, loaded_db):
+        """The guards must be inspectable, not just effective."""
+        recorded = list(
+            loaded_db.execute(
+                select(Candidate).where(Candidate.rejection_reason.is_not(None))
+            ).scalars()
+        )
+        assert recorded, "no rejections persisted — the discovery guards are invisible"
+        assert any("excluded_archetype" in (c.rejection_reason or "") for c in recorded)

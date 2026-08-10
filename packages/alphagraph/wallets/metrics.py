@@ -54,7 +54,10 @@ EXCLUDED_ARCHETYPES = frozenset({Archetype.BOT, Archetype.HIGH_FREQUENCY, Archet
 class ExclusionRules:
     max_trades_per_month: float = 45.0
     max_distinct_tokens_per_month: float = 25.0
-    min_reaction_seconds: float = 3.0
+    #: Minimum plausible gap between a token existing and a human buying it.
+    #: Anything faster is a sniper bot reacting programmatically to the launch.
+    min_entry_latency_seconds: float = 30.0
+    min_sniper_entries: int = 3
     max_active_hour_spread: int = 20  # distinct UTC hours seen; 24/7 → automation
     min_median_hold_hours: float = 2.0
 
@@ -84,7 +87,9 @@ class WalletMetricSet:
     trades_per_month: float = 0.0
     distinct_tokens_per_month: float = 0.0
     distinct_active_hours: int = 0
-    min_reaction_seconds: float | None = None
+    #: Shortest observed gap between a token's creation and this wallet buying it.
+    min_entry_latency_seconds: float | None = None
+    sniper_entries: int = 0
     median_hold_hours: float | None = None
 
     # Precision, per predictive outcome class
@@ -227,13 +232,7 @@ class WalletMetricsCalculator:
         metrics.active_days = len({e.observed_at.date() for e in events})
         metrics.distinct_active_hours = len({e.observed_at.hour for e in events})
 
-        reaction = [
-            (e.observed_at - e.chain_time).total_seconds()
-            for e in events
-            if e.observed_at and e.chain_time
-        ]
-        if reaction:
-            metrics.min_reaction_seconds = min(reaction)
+        self._score_entry_latency(metrics, acquisitions)
 
         sizes = [float(e.usd_value) for e in events if e.usd_value is not None]
         if sizes:
@@ -253,6 +252,47 @@ class WalletMetricsCalculator:
         self._score_earliness(metrics, acquisitions, outcomes, as_of)
         self._classify(metrics)
         return metrics
+
+    def _score_entry_latency(self, metrics: WalletMetricSet, acquisitions: list[Event]) -> None:
+        """How soon after a token existed did this wallet buy it?
+
+        Measured from the asset's first-seen chain time, NOT from our own
+        observation lag. Observation lag describes our infrastructure; entry
+        latency describes their behaviour, and only the second one says anything
+        about whether a wallet is automated.
+        """
+        latencies: list[float] = []
+        threshold = self.exclusions.min_entry_latency_seconds
+        for event in acquisitions:
+            if not event.asset_id:
+                continue
+            created = self._creation_time(event.asset_id)
+            if created is None:
+                # We never ingested this token's creation — it predates the
+                # backfill window. Measuring latency against the earliest event
+                # we happen to hold would understate it and manufacture false
+                # sniper counts at every backfill boundary.
+                continue
+            latency = (event.chain_time - created).total_seconds()
+            if latency < 0:
+                continue
+            latencies.append(latency)
+            if latency <= threshold:
+                metrics.sniper_entries += 1
+        if latencies:
+            metrics.min_entry_latency_seconds = min(latencies)
+
+    def _creation_time(self, asset_id: str) -> datetime | None:
+        """Chain time of the asset's observed creation event, if we have one."""
+        return self.session.execute(
+            select(Event.chain_time)
+            .where(
+                Event.asset_id == asset_id,
+                Event.event_type == EventType.TOKEN_CREATED.value,
+            )
+            .order_by(Event.chain_time)
+            .limit(1)
+        ).scalar_one_or_none()
 
     def _median_hold_hours(self, events: list[Event]) -> float | None:
         opened: dict[str, datetime] = {}
@@ -388,13 +428,15 @@ class WalletMetricsCalculator:
         th = self.thresholds
 
         # Hard exclusions first. These win over any measured performance.
-        if metrics.min_reaction_seconds is not None and (
-            metrics.min_reaction_seconds < ex.min_reaction_seconds
-        ):
+        # A sniper's hit rate can be excellent and is still worthless here:
+        # "bought 1.2 seconds after the mint existed" is not information, it is
+        # infrastructure, and no human researcher can act on it.
+        if metrics.sniper_entries >= ex.min_sniper_entries:
             metrics.archetype = Archetype.BOT
             metrics.archetype_confidence = 0.95
             metrics.excluded_reason = (
-                f"reaction_time_{metrics.min_reaction_seconds:.2f}s_below_human_threshold"
+                f"entered_within_{ex.min_entry_latency_seconds:.0f}s_of_launch_"
+                f"{metrics.sniper_entries}_times"
             )
             return
         if (

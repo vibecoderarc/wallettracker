@@ -38,7 +38,7 @@ from alphagraph.core.events import (
 )
 from alphagraph.core.idempotency import event_key
 from alphagraph.core.outcomes import Outcome, OutcomeClass
-from alphagraph.core.timeutil import days, hours, minutes
+from alphagraph.core.timeutil import days, hours
 
 SEED = 20260810
 WORLD_START = datetime(2025, 6, 1, tzinfo=__import__("datetime").UTC)
@@ -71,6 +71,7 @@ class World:
     outcomes: list[Outcome] = field(default_factory=list)
     wallets: dict[str, WalletSpec] = field(default_factory=dict)
     candles: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    created_at: dict[str, datetime] = field(default_factory=dict)
 
     def wallet(self, handle: str) -> str:
         return self.wallets[handle].address
@@ -168,6 +169,31 @@ class _Builder:
     def _register(self, spec: WalletSpec) -> str:
         self.world.wallets[spec.handle] = spec
         return spec.address
+
+    def _create_token(self, asset: AssetRef, at: datetime) -> datetime:
+        """Emit the token's creation event and record when it happened.
+
+        Needed so that "how fast did this wallet enter after launch" is
+        answerable. Without a creation event, entry latency can only be measured
+        against the first event we happened to see, which is our own ingestion
+        artifact rather than anything about the wallet.
+        """
+        self.world.created_at[asset.address] = at
+        self._emit(
+            event_type=EventType.TOKEN_CREATED,
+            actor=_addr(self.rng, "Dply"),
+            asset=asset,
+            chain_time=at,
+        )
+        return at
+
+    def _after_creation(self, asset: AssetRef, latest: datetime) -> datetime:
+        """A random time between this asset's creation and `latest`."""
+        created = self.world.created_at[asset.address]
+        if latest <= created:
+            latest = created + days(1)
+        span = (latest - created).total_seconds()
+        return created + timedelta(seconds=self.rng.uniform(60, span))
 
     # ------------------------------------------------------------ price paths
 
@@ -331,7 +357,8 @@ class _Builder:
         # Duds: nothing ever happens. They exist so the population base rate is
         # honest. Removing them would inflate every hit rate in the system.
         for asset in dud_assets:
-            t = WORLD_START + days(rng.uniform(10, 300))
+            t = WORLD_START + days(rng.uniform(45, 300))
+            self._create_token(asset, t - days(30))
             self._price_path(asset, t, peak_multiple=rng.uniform(0.3, 1.6), collapse=False)
             for _ in range(rng.randint(3, 12)):
                 self._emit(
@@ -346,6 +373,7 @@ class _Builder:
         # ---- Listing storyline (the CASHCAT shape) ----------------------
         for i, asset in enumerate(listing_assets):
             t0 = WORLD_START + days(40 + i * 42)
+            self._create_token(asset, t0 - days(38))
             self._price_path(asset, t0, peak_multiple=rng.uniform(3.5, 9.0), collapse=False)
             self._outcome(asset, OutcomeClass.CEX_LISTING, t0, venue="robinhood")
             self._outcome(asset, OutcomeClass.PRICE_RUN, t0 + hours(6), magnitude=Decimal("3"))
@@ -411,7 +439,8 @@ class _Builder:
 
         # ---- Quiet accumulator ------------------------------------------
         for i, asset in enumerate(run_assets):
-            t0 = WORLD_START + days(30 + i * 34)
+            t0 = WORLD_START + days(50 + i * 34)
+            created = self._create_token(asset, t0 - days(44))
             self._price_path(asset, t0, peak_multiple=rng.uniform(4.0, 14.0), collapse=False)
             self._outcome(asset, OutcomeClass.PRICE_RUN, t0, magnitude=Decimal("5"))
             if i < 6:
@@ -423,20 +452,20 @@ class _Builder:
                     side=Side.BUY,
                     usd_value=Decimal(str(round(rng.uniform(20_000, 60_000), 2))),
                 )
-            # Sniper is in everything, instantly.
+            # Sniper is in everything, 1.2 seconds after the token exists.
             self._emit(
                 event_type=EventType.SWAP,
                 actor=sniper_bot,
                 asset=asset,
-                chain_time=t0 - days(44) + minutes(0.02),
+                chain_time=created + timedelta(seconds=1.2),
                 side=Side.BUY,
                 usd_value=Decimal("900"),
-                observation_lag=timedelta(milliseconds=120),
             )
 
         # ---- Revival specialist -----------------------------------------
         for i, asset in enumerate(revival_assets):
-            t0 = WORLD_START + days(120 + i * 60)
+            t0 = WORLD_START + days(160 + i * 40)
+            self._create_token(asset, t0 - days(150))
             self._dormant_then_revival(asset, t0)
             self._outcome(asset, OutcomeClass.REVIVAL, t0, magnitude=Decimal("8"))
             for k in range(4):
@@ -452,6 +481,7 @@ class _Builder:
         # ---- Pump operator ----------------------------------------------
         for i, asset in enumerate(pump_assets):
             t0 = WORLD_START + days(70 + i * 50)
+            self._create_token(asset, t0 - days(40))
             self._price_path(asset, t0, peak_multiple=rng.uniform(6.0, 20.0), collapse=True)
             self._outcome(asset, OutcomeClass.PUMP_EVENT, t0, magnitude=Decimal("10"))
             self._outcome(asset, OutcomeClass.RUG_OR_COLLAPSE, t0 + days(3))
@@ -479,7 +509,7 @@ class _Builder:
                 event_type=EventType.SWAP,
                 actor=lucky,
                 asset=asset,
-                chain_time=WORLD_START + days(31),
+                chain_time=self._after_creation(asset, WORLD_START + days(31)),
                 side=Side.BUY,
                 usd_value=Decimal("2500"),
             )
@@ -490,10 +520,9 @@ class _Builder:
                     event_type=EventType.SWAP,
                     actor=churner,
                     asset=asset,
-                    chain_time=WORLD_START + days(rng.uniform(5, 380)),
+                    chain_time=self._after_creation(asset, WORLD_END),
                     side=Side.BUY if rng.random() > 0.4 else Side.SELL,
                     usd_value=Decimal(str(round(rng.uniform(200, 4000), 2))),
-                    observation_lag=timedelta(seconds=2),
                 )
         # Noise: random participation across everything.
         for asset in self.world.assets:
@@ -502,7 +531,7 @@ class _Builder:
                     event_type=EventType.SWAP,
                     actor=rng.choice(noise_wallets),
                     asset=asset,
-                    chain_time=WORLD_START + days(rng.uniform(1, 400)),
+                    chain_time=self._after_creation(asset, WORLD_END),
                     side=Side.BUY,
                     usd_value=Decimal(str(round(rng.uniform(50, 15_000), 2))),
                 )

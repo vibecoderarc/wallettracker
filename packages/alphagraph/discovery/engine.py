@@ -37,6 +37,13 @@ from alphagraph.wallets.metrics import (
 #: something different from one appearing in the last hour.
 LOOKBACK_WINDOWS = (days(1), days(7), days(30))
 
+#: How many near-miss rejections to persist per sweep, ranked by how close
+#: they came. The guards must stay auditable — a discovery screen showing only
+#: successes gives no way to tell a working filter from a broken one — but
+#: persisting every rejected wallet would be tens of thousands of rows of
+#: noise against real data.
+MAX_REJECTIONS_RECORDED = 25
+
 
 class CandidateStatus:
     SURFACED = "surfaced"
@@ -258,7 +265,17 @@ class DiscoveryEngine:
         return scores
 
     def persist(self, scores: list[CandidateScore], as_of: datetime) -> dict[str, int]:
-        counts = {"surfaced": 0, "updated": 0, "rejected": 0}
+        counts = {"surfaced": 0, "updated": 0, "rejected": 0, "rejections_recorded": 0}
+
+        # Keep only the closest misses. Ranked by hits then edge, so what lands
+        # in the UI is the wallets that nearly qualified, not random noise.
+        near_misses = sorted(
+            (s for s in scores if not s.passed),
+            key=lambda s: (s.hits, s.edge_ratio),
+            reverse=True,
+        )[:MAX_REJECTIONS_RECORDED]
+        recordable = {s.wallet for s in near_misses}
+
         # Rejected scores are still walked so an existing candidate that has
         # decayed gets its rejection reason recorded rather than silently
         # keeping yesterday's flattering numbers.
@@ -269,7 +286,7 @@ class DiscoveryEngine:
 
             status = CandidateStatus.SURFACED if score.passed else CandidateStatus.REJECTED
             if existing is None:
-                if not score.passed:
+                if not score.passed and score.wallet not in recordable:
                     counts["rejected"] += 1
                     continue
                 self.session.add(
@@ -289,7 +306,11 @@ class DiscoveryEngine:
                         rejection_reason=score.rejection_reason,
                     )
                 )
-                counts["surfaced"] += 1
+                if score.passed:
+                    counts["surfaced"] += 1
+                else:
+                    counts["rejected"] += 1
+                    counts["rejections_recorded"] += 1
             else:
                 existing.hit_rate = score.hit_rate
                 existing.shrunk_hit_rate = score.shrunk_hit_rate
