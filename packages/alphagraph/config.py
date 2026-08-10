@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     #: Comma-separated browser origins permitted to call the API.
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    #: Populate an empty database from the fixture world on first boot, so a
+    #: fresh deploy shows a working dashboard without anyone running a command
+    #: by hand. Only ever acts in fixture mode and only when there are no events.
+    auto_seed: bool = True
+
     @field_validator("fixture_dir")
     @classmethod
     def _fixture_dir_exists(cls, v: Path) -> Path:
