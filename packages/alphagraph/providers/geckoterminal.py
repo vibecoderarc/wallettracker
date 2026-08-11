@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from alphagraph.core.addresses import Network
 from alphagraph.core.events import AssetRef
 from alphagraph.providers.base import (
     Candle,
@@ -34,6 +32,9 @@ from alphagraph.providers.base import (
     Unsupported,
 )
 from alphagraph.providers.http import HttpClient
+from alphagraph.providers.universe import PoolRef
+
+__all__ = ["GeckoTerminalProvider", "PoolRef"]
 
 log = logging.getLogger(__name__)
 
@@ -68,22 +69,6 @@ def _decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         return None
-
-
-@dataclass(frozen=True, slots=True)
-class PoolRef:
-    """A tradable pool and the non-quote token it prices."""
-
-    pool_address: str
-    token_address: str
-    symbol: str | None
-    reserve_usd: Decimal | None
-    volume_24h_usd: Decimal | None
-    created_at: datetime | None
-
-    @property
-    def asset(self) -> AssetRef:
-        return AssetRef(network=Network.SOLANA, address=self.token_address, symbol=self.symbol)
 
 
 class GeckoTerminalProvider(MarketDataProvider):
@@ -375,3 +360,7 @@ class GeckoTerminalProvider(MarketDataProvider):
 
     def _pool_for_asset(self, asset: AssetRef) -> str | None:
         return getattr(self, "_pool_by_asset", {}).get(asset.address)
+
+    def series_key_for(self, asset: AssetRef) -> str | None:
+        """Which pool prices this asset, or None if it was never registered."""
+        return self._pool_for_asset(asset)

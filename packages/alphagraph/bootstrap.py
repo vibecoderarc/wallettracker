@@ -53,8 +53,8 @@ from alphagraph.outcomes.registry import (
     detect_pump_event,
     detect_revival,
 )
-from alphagraph.providers.geckoterminal import GeckoTerminalProvider, PoolRef
 from alphagraph.providers.helius import HeliusChainProvider
+from alphagraph.providers.universe import PoolRef, UniverseSource
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ class BootstrapSweep:
         self,
         session: Session,
         chain: HeliusChainProvider,
-        market: GeckoTerminalProvider,
+        market: UniverseSource,
         budget: SweepBudget | None = None,
     ) -> None:
         self.session = session
@@ -184,7 +184,7 @@ class BootstrapSweep:
             "estimated_helius_requests": pass1 + pass2,
             "budget_cap": self.budget.max_helius_requests,
             "within_budget": (pass1 + pass2) <= self.budget.max_helius_requests,
-            "geckoterminal_usage": self.market.usage,
+            "market_data_usage": self.market.usage,
         }
 
     # ---------------------------------------------------------------- passes
@@ -313,7 +313,7 @@ class BootstrapSweep:
         from alphagraph.core.addresses import Network
         from alphagraph.core.events import AssetRef
 
-        return self.market._pool_for_asset(AssetRef(network=Network.SOLANA, address=address))
+        return self.market.series_key_for(AssetRef(network=Network.SOLANA, address=address))
 
     async def pass_two_qualify(self, suspects: set[str], start: datetime, end: datetime) -> None:
         """Fetch each suspect's full history, so the denominator is honest.
@@ -356,7 +356,7 @@ class BootstrapSweep:
         self.report.base_rate = self.registry.base_rate(OutcomeClass.PRICE_RUN, end)[0]
         self.report.provider_usage = {
             "helius": self.chain.usage,
-            "geckoterminal": self.market.usage,
+            self.market.name: self.market.usage,
         }
         self.session.flush()
         return self.report
