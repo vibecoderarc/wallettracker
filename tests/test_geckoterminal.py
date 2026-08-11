@@ -173,3 +173,100 @@ class TestSnapshots:
             )
         )
         assert bool(result) is False
+
+
+class TestUniverseQuality:
+    """Regressions for what the first live smoke test actually returned.
+
+    It came back with tokenised equities (NVDA, HOOD, SNDK) holding reserves of
+    fractions of a cent, and 16 hourly candles spanning a single day. Neither is
+    a usable universe, and both were silent failures — the code "worked".
+    """
+
+    def _pool(self, *, symbol: str, reserve: str, address: str = POOL) -> dict:
+        return {
+            "id": f"solana_{address}",
+            "attributes": {
+                "address": address,
+                "name": f"{symbol} / SOL",
+                "reserve_in_usd": reserve,
+                "volume_usd": {"h24": "1000"},
+                "pool_created_at": "2026-01-15T08:30:00Z",
+            },
+            "relationships": {"base_token": {"data": {"id": f"solana_{MEME}{address[:2]}"}}},
+        }
+
+    def test_dust_pools_are_excluded(self):
+        """A 10x on a pool holding $0.000003 is noise, not a tradable outcome."""
+        payload = {
+            "data": [
+                self._pool(symbol="DUST", reserve="0.000002732476289", address="AAA"),
+                self._pool(symbol="REAL", reserve="250000", address="BBB"),
+            ]
+        }
+        provider, _ = _provider([httpx.Response(200, json=payload)])
+        pools = asyncio.run(provider.top_pools(pages=1))
+        assert [p.symbol for p in pools] == ["REAL"]
+
+    def test_liquidity_floor_is_configurable(self):
+        payload = {"data": [self._pool(symbol="SMALL", reserve="1000", address="CCC")]}
+        provider, _ = _provider([httpx.Response(200, json=payload)])
+        from decimal import Decimal as D
+
+        pools = asyncio.run(provider.top_pools(pages=1, min_liquidity_usd=D("100")))
+        assert len(pools) == 1
+
+    def test_listing_is_sorted_by_volume_not_endpoint_default(self):
+        """The default order returned dust; volume ordering is requested explicitly."""
+        provider, transport = _provider([httpx.Response(200, json={"data": []})])
+        asyncio.run(provider.top_pools(pages=1))
+        assert "sort=h24_volume_usd_desc" in str(transport.requests[0].url)
+
+    def test_candles_default_to_daily_for_real_history(self):
+        """Hourly reached only ~1 day in practice; a run months ago is invisible."""
+        provider, transport = _provider([httpx.Response(200, json=_ohlcv_payload([]))])
+        asyncio.run(provider.pool_candles(POOL))
+        url = str(transport.requests[0].url)
+        assert "/ohlcv/day" in url
+        assert "limit=180" in url
+
+    def test_universe_merges_established_and_trending(self):
+        """Only-trending is survivorship; only-established misses new launches."""
+        established = {"data": [self._pool(symbol="OLD", reserve="500000", address="OLD1")]}
+        trending = {"data": [self._pool(symbol="HOT", reserve="500000", address="HOT1")]}
+        provider, _ = _provider(
+            [httpx.Response(200, json=established), httpx.Response(200, json=trending)]
+        )
+        pools = asyncio.run(provider.universe(pages=1))
+        assert {p.symbol for p in pools} == {"OLD", "HOT"}
+
+    def test_duplicate_pools_across_pages_are_deduped(self):
+        payload = {"data": [self._pool(symbol="SAME", reserve="500000", address="DUP")]}
+        provider, _ = _provider(
+            [httpx.Response(200, json=payload), httpx.Response(200, json=payload)]
+        )
+        assert len(asyncio.run(provider.top_pools(pages=2))) == 1
+
+
+class TestRateLimitResilience:
+    def test_repeated_429s_are_retried(self):
+        """Retry-After is obeyed when present; absent, the wait escalates."""
+        provider, transport = _provider(
+            [
+                httpx.Response(429, headers={"retry-after": "0"}, json={}),
+                httpx.Response(429, headers={"retry-after": "0"}, json={}),
+                httpx.Response(200, json=_ohlcv_payload([])),
+            ]
+        )
+        asyncio.run(provider.pool_candles(POOL))
+        assert len(transport.requests) == 3
+        assert provider.usage["rate_limited"] == 2
+
+    def test_absent_retry_after_escalates_instead_of_guessing_short(self):
+        from alphagraph.providers.http import HttpClient as _HttpClient
+
+        client = _HttpClient(provider="t", requests_per_second=0)
+        assert client._retry_after(httpx.Response(429, json={})) is None
+        assert (
+            client._retry_after(httpx.Response(429, headers={"retry-after": "12"}, json={})) == 12.0
+        )

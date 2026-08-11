@@ -249,7 +249,8 @@ class TestFailureHandling:
 
     def test_persistent_failure_raises_rather_than_returning_empty(self):
         """Empty and failed must never look the same to the caller."""
-        provider, _ = _provider([httpx.Response(500, json={}) for _ in range(6)])
+        # One more than max_retries, so the retries are genuinely exhausted.
+        provider, _ = _provider([httpx.Response(500, json={}) for _ in range(10)])
 
         async def run():
             return [

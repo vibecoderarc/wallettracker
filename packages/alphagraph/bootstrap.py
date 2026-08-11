@@ -47,6 +47,7 @@ from alphagraph.discovery.engine import DiscoveryEngine
 from alphagraph.ingestion.pipeline import Ingestor
 from alphagraph.outcomes.registry import (
     OutcomeRegistry,
+    daily_configs,
     detect_collapse,
     detect_price_run,
     detect_pump_event,
@@ -146,8 +147,7 @@ class BootstrapSweep:
         Only the keyless provider is touched. Run this before the real thing so
         the request count is a decision rather than a discovery.
         """
-        pools = await self.market.top_pools(pages=pages)
-        pools = pools[: self.budget.max_pools]
+        pools = (await self.market.universe(pages=pages))[: self.budget.max_pools]
 
         outcomes = 0
         priced = 0
@@ -175,9 +175,12 @@ class BootstrapSweep:
     # ---------------------------------------------------------------- passes
 
     def _detect(self, pool: PoolRef, candles: list) -> list:
-        run = detect_price_run(pool.asset, candles)
-        revival = detect_revival(pool.asset, candles)
-        collapse = detect_collapse(pool.asset, candles)
+        # Live sweeps read daily candles, so the detectors need the scaled
+        # volume floors. Using the hourly defaults here would admit dust.
+        run_cfg, revival_cfg, collapse_cfg = daily_configs()
+        run = detect_price_run(pool.asset, candles, run_cfg)
+        revival = detect_revival(pool.asset, candles, revival_cfg)
+        collapse = detect_collapse(pool.asset, candles, collapse_cfg)
         pump = detect_pump_event(pool.asset, candles, run, collapse)
         return [o for o in (run, revival, collapse, pump) if o is not None]
 
@@ -188,7 +191,7 @@ class BootstrapSweep:
         happened. Those are the denominator of the population base rate; drop
         them and every hit rate in the system becomes meaningless.
         """
-        pools = (await self.market.top_pools(pages=pages))[: self.budget.max_pools]
+        pools = (await self.market.universe(pages=pages))[: self.budget.max_pools]
         self.report.pools_examined = len(pools)
 
         for pool in pools:

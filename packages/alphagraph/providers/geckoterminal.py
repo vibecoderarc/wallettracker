@@ -39,9 +39,22 @@ log = logging.getLogger(__name__)
 
 GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2"
 
-#: The public tier is rate limited; the docs do not publish an exact figure, so
-#: this is deliberately conservative. Being refused costs a request either way.
-DEFAULT_RPS = 0.5
+#: Observed: the public tier refuses persistently at 0.5 req/s, exhausting
+#: retries. It behaves like a per-minute window, so pace well under it — being
+#: refused costs a request just as a successful call does, and a 429 storm
+#: wastes the whole run.
+DEFAULT_RPS = 0.25
+
+#: Daily candles, so one request covers months. Hourly at limit=1000 reaches
+#: only ~41 days, and in practice returned 16 hours for a young pool — nowhere
+#: near enough to detect a run that happened months ago.
+DEFAULT_TIMEFRAME = "day"
+DEFAULT_CANDLE_LIMIT = 180
+
+#: Pools below this are dust. The default pool listing returned reserves of
+#: fractions of a cent, and a "10x" on a pool holding $0.000003 is noise, not an
+#: outcome anyone could have traded.
+MIN_POOL_LIQUIDITY_USD = Decimal("15000")
 
 #: A quote token's price history says nothing about a memecoin's fate, and pools
 #: are named for both sides. These are filtered out of the universe.
@@ -98,24 +111,54 @@ class GeckoTerminalProvider(MarketDataProvider):
 
     # -------------------------------------------------------------- universe
 
-    async def top_pools(self, pages: int = 5, trending: bool = False) -> list[PoolRef]:
+    async def top_pools(
+        self,
+        pages: int = 5,
+        trending: bool = False,
+        min_liquidity_usd: Decimal | None = None,
+    ) -> list[PoolRef]:
         """Pools worth considering as the discovery universe.
 
-        Deliberately includes ordinary pools, not only trending ones. A universe
-        built from what is hot today is a survivorship trap: every token in it
-        already moved, the base rate approaches 100%, and no wallet can show an
-        edge over it.
+        Sorted by 24h volume rather than taking the endpoint's default order.
+        The default returned tokenised equities with reserves of fractions of a
+        cent — an unusable universe, both because dust pools cannot produce a
+        tradable outcome and because they are not the market being studied.
+
+        Still deliberately includes ordinary pools, not only trending ones. A
+        universe built from what is hot today is a survivorship trap: every token
+        in it already moved, the base rate approaches 100%, and no wallet can
+        show an edge over it.
         """
         path = "/networks/solana/trending_pools" if trending else "/networks/solana/pools"
+        floor = MIN_POOL_LIQUIDITY_USD if min_liquidity_usd is None else min_liquidity_usd
         pools: list[PoolRef] = []
+        seen: set[str] = set()
 
         for page in range(1, pages + 1):
-            payload = await self._http.get_json(path, {"page": page})
+            payload = await self._http.get_json(path, {"page": page, "sort": "h24_volume_usd_desc"})
             for item in self._items(payload):
                 pool = self._parse_pool(item)
-                if pool is not None:
-                    pools.append(pool)
+                if pool is None or pool.pool_address in seen:
+                    continue
+                if floor > 0 and (pool.reserve_usd or Decimal(0)) < floor:
+                    continue
+                seen.add(pool.pool_address)
+                pools.append(pool)
         return pools
+
+    async def universe(self, pages: int = 3) -> list[PoolRef]:
+        """Combine listings so the universe is not only what is hot right now.
+
+        Top-by-volume supplies established tokens; trending supplies the ones
+        currently moving. Both are needed: only-trending is survivorship, and
+        only-established misses the launches this system exists to catch.
+        """
+        established = await self.top_pools(pages=pages, trending=False)
+        hot = await self.top_pools(pages=1, trending=True)
+        merged: dict[str, PoolRef] = {p.pool_address: p for p in established}
+        for pool in hot:
+            merged.setdefault(pool.pool_address, pool)
+        return list(merged.values())
 
     @staticmethod
     def _items(payload: Any) -> list[dict[str, Any]]:
@@ -169,7 +212,10 @@ class GeckoTerminalProvider(MarketDataProvider):
     # ---------------------------------------------------------------- prices
 
     async def pool_candles(
-        self, pool_address: str, timeframe: str = "hour", limit: int = 1000
+        self,
+        pool_address: str,
+        timeframe: str = DEFAULT_TIMEFRAME,
+        limit: int = DEFAULT_CANDLE_LIMIT,
     ) -> list[Candle]:
         """Hourly OHLCV for a pool, cached because sweeps re-read the same pools.
 
@@ -266,7 +312,9 @@ class GeckoTerminalProvider(MarketDataProvider):
             market_cap_usd=None,
             holder_count=None,
             provider=self.name,
-            is_stale=age_hours > 6,
+            # Daily candles: anything older than ~2 days is stale. Judging
+            # daily data by an hourly threshold marks everything stale.
+            is_stale=age_hours > 48,
         )
 
     async def candles(
