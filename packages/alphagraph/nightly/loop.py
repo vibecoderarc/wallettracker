@@ -160,6 +160,10 @@ class NightlyLoop:
             if precision > best_precision + 0.05 and survivors >= 10:
                 best_threshold, best_precision = candidate, precision
 
+        # A family that fires often and is right rarely costs more attention
+        # than it returns. Propose muting it — never act unilaterally.
+        proposals.extend(self._family_proposals(as_of))
+
         if best_threshold != current:
             proposal = Proposal(
                 kind="threshold",
@@ -190,6 +194,66 @@ class NightlyLoop:
 
         self.session.flush()
         return proposals, variants, note
+
+    def _family_proposals(self, as_of: datetime) -> list[Proposal]:
+        """Propose muting under-performing families and reinstating recovered ones.
+
+        Compared against the population base rate rather than an absolute
+        number: 5% precision is worthless when 6.8% of all assets move anyway,
+        and respectable when only 1% do.
+        """
+        from alphagraph.core.outcomes import OutcomeClass
+        from alphagraph.signals.policy import MUTED_FAMILIES
+
+        base_rate, _, _ = OutcomeRegistry(self.session).base_rate(OutcomeClass.PRICE_RUN, as_of)
+        proposals: list[Proposal] = []
+
+        for family, stats in self.family_precision.items():
+            graded = int(stats["graded"])
+            if graded < 30:
+                continue
+            precision = stats["precision"]
+            muted = family in MUTED_FAMILIES
+
+            if not muted and precision < base_rate:
+                proposals.append(
+                    Proposal(
+                        kind="mute_family",
+                        target=f"alert_policy.muted_families += {family}",
+                        current_value="alerting",
+                        proposed_value="muted",
+                        justification=(
+                            f"{family} is right {precision:.1%} of the time across "
+                            f"{graded} graded signals, below the {base_rate:.1%} you would "
+                            "get from picking assets at random."
+                        ),
+                        backtest_summary={"precision": precision, "base_rate": base_rate},
+                        sample_size=graded,
+                        variants_tested=1,
+                        status="pending",
+                    )
+                )
+            elif muted and precision > base_rate * 2:
+                proposals.append(
+                    Proposal(
+                        kind="unmute_family",
+                        target=f"alert_policy.muted_families -= {family}",
+                        current_value="muted",
+                        proposed_value="alerting",
+                        justification=(
+                            f"{family} has recovered to {precision:.1%} across {graded} "
+                            f"graded signals, more than double the {base_rate:.1%} base rate."
+                        ),
+                        backtest_summary={"precision": precision, "base_rate": base_rate},
+                        sample_size=graded,
+                        variants_tested=1,
+                        status="pending",
+                    )
+                )
+
+        for proposal in proposals:
+            self.session.add(proposal)
+        return proposals
 
     @staticmethod
     def _family_precision(signals: list[SignalRow]) -> dict[str, dict[str, float]]:

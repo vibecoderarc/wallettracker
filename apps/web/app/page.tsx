@@ -8,7 +8,7 @@ export default async function Today() {
   try {
     [coverage, signals, candidates] = await Promise.all([
       api.coverage(),
-      api.signals(40),
+      api.signals(40, true),
       api.candidates(),
     ]);
   } catch (error) {
@@ -37,8 +37,9 @@ export default async function Today() {
     <>
       <h1>Today</h1>
       <p className="sub">
-        What needs attention, ranked by how unusual the action is <em>for that wallet</em> —
-        not by dollar size.
+        Only signals worth interrupting you for. A family has to demonstrate precision
+        above the population base rate before it appears here — the rest are still
+        recorded and graded, just not shown.
       </p>
 
       <ShadowBanner enabled={coverage.notifications_enabled} />
@@ -61,6 +62,18 @@ export default async function Today() {
           note={`${coverage.events.toLocaleString()} events ingested`}
         />
       </div>
+
+      {signals.muted_signal_count > 0 && (
+        <div className="banner" style={{ marginTop: 16 }}>
+          <strong>
+            {signals.muted_signal_count.toLocaleString()} signals hidden from{" "}
+            {signals.muted_families.map((f) => f.replace(/_/g, " ")).join(", ")}
+          </strong>
+          That family fires far more often than it is right — below the rate you would
+          get by picking assets at random. It is still computed and graded every night,
+          and will be reinstated only if it earns it.
+        </div>
+      )}
 
       <h2>Ranked signals</h2>
       {ranked.length === 0 ? (

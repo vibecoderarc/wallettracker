@@ -235,12 +235,31 @@ def list_signals(
     limit: int = Query(50, le=200),
     family: str | None = None,
     min_significance: float = 0.0,
+    alertable: bool = False,
 ) -> dict:
+    """`alertable=true` returns only what would actually interrupt you.
+
+    Muted families are still stored and graded — they are simply not worth
+    anyone's attention until they demonstrate precision above the base rate.
+    """
+    from alphagraph.signals.policy import MUTED_FAMILIES
+
     stmt = select(SignalRow).where(SignalRow.significance >= min_significance)
     if family:
         stmt = stmt.where(SignalRow.family == family)
+    if alertable:
+        stmt = stmt.where(SignalRow.family.not_in(list(MUTED_FAMILIES)))
     rows = db.execute(stmt.order_by(desc(SignalRow.triggered_at)).limit(limit)).scalars().all()
-    return {"signals": [_serialize(r, SIGNAL_FIELDS) for r in rows], "disclaimer": DISCLAIMER}
+
+    muted_total = db.execute(
+        select(func.count(SignalRow.id)).where(SignalRow.family.in_(list(MUTED_FAMILIES)))
+    ).scalar_one()
+    return {
+        "signals": [_serialize(r, SIGNAL_FIELDS) for r in rows],
+        "muted_families": sorted(MUTED_FAMILIES),
+        "muted_signal_count": muted_total,
+        "disclaimer": DISCLAIMER,
+    }
 
 
 @app.get("/v1/signals/{signal_id}", dependencies=protected)
