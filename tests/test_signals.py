@@ -194,3 +194,86 @@ class TestPhishingSafety:
 
     def test_newlines_stripped(self):
         assert "\n" not in sanitize_for_notification("a\nb")
+
+
+class TestAlertVolume:
+    """Alert volume is a product requirement, not a tuning detail.
+
+    Measured on the fixture world: silent_accumulation fires 5.3 times a day at
+    1.5% precision against a 6.8% base rate — worse than picking at random, and
+    on volume alone it buries every genuinely rare signal. Everything else
+    combined is roughly one alert every five days at 92-100%.
+    """
+
+    def _dispatcher(self, session, policy=None):
+        settings = Settings(
+            run_mode=RunMode.LIVE_ALERTS, notification_webhook="https://example.invalid/hook"
+        )
+        notifier = RecordingNotificationProvider()
+        return AlertDispatcher(session, notifier, policy or AlertPolicy(), settings), notifier
+
+    def test_muted_family_is_stored_but_never_delivered(self, session):
+        """Muting must not delete evidence — it still has to be gradeable."""
+        dispatcher, notifier = self._dispatcher(session)
+        result = asyncio.run(
+            dispatcher.dispatch(
+                [_signal(family=Family.SILENT_ACCUMULATION, asset_id="solana:MUTED")]
+            )
+        )
+        assert result.persisted == 1, "muted signals must still be recorded"
+        assert result.suppressed_muted == 1
+        assert result.delivered == 0
+        assert notifier.sent == []
+
+    def test_unmuted_family_is_delivered(self, session):
+        dispatcher, notifier = self._dispatcher(session)
+        result = asyncio.run(
+            dispatcher.dispatch(
+                [_signal(family=Family.SEQUENCE_CONFIRMATION, asset_id="solana:LOUD")]
+            )
+        )
+        assert result.delivered == 1
+        assert len(notifier.sent) == 1
+
+    def test_daily_cap_bounds_the_flood(self, session):
+        """A backstop for the case where some future change makes a family chatty."""
+        dispatcher, notifier = self._dispatcher(
+            session, AlertPolicy(max_alerts_per_day=3, cooldown=timedelta(seconds=0))
+        )
+        signals = [
+            _signal(
+                family=Family.TRACKED_ENTITY_ACTION,
+                asset_id=f"solana:CAP{i}",
+                wallet=f"capwallet{i}",
+            )
+            for i in range(10)
+        ]
+        result = asyncio.run(dispatcher.dispatch(signals))
+        assert result.delivered == 3
+        assert result.suppressed_daily_cap == 7
+        assert len(notifier.sent) == 3
+
+    def test_critical_risk_ignores_both_the_cap_and_muting(self, session):
+        """A cap on attention must never suppress a warning."""
+        dispatcher, _notifier = self._dispatcher(
+            session, AlertPolicy(max_alerts_per_day=0, cooldown=timedelta(seconds=0))
+        )
+        result = asyncio.run(
+            dispatcher.dispatch(
+                [_signal(family=Family.PUMP_OPERATOR, asset_id="solana:CRIT", significance=0.01)]
+            )
+        )
+        assert result.delivered == 1
+        assert result.suppressed_daily_cap == 0
+
+    def test_noisy_family_is_muted_by_default(self):
+        from alphagraph.signals.policy import MUTED_FAMILIES
+
+        assert Family.SILENT_ACCUMULATION in MUTED_FAMILIES
+        for earned in (
+            Family.SEQUENCE_CONFIRMATION,
+            Family.RESTING_ORDER,
+            Family.TRACKED_ENTITY_ACTION,
+            Family.PUMP_OPERATOR,
+        ):
+            assert earned not in MUTED_FAMILIES

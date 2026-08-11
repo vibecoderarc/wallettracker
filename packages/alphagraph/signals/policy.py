@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alphagraph.config import Settings, get_settings
@@ -24,6 +24,17 @@ from alphagraph.signals.engine import Family, Signal
 
 CRITICAL_RISK_FAMILIES = {Family.PUMP_OPERATOR}
 
+#: Families that are computed and stored but never alerted on.
+#:
+#: A family earns the right to interrupt you by demonstrating precision above
+#: the population base rate. `silent_accumulation` fires ~5 times a day at 1.5%
+#: precision against a 6.8% base rate — it is worse than guessing, and on volume
+#: alone it would bury every genuinely rare signal. It stays recorded so the
+#: nightly loop keeps grading it and can propose reinstating it if it improves.
+#:
+#: Muting is a display and delivery decision, not deletion: nothing is lost.
+MUTED_FAMILIES = frozenset({Family.SILENT_ACCUMULATION})
+
 
 @dataclass(frozen=True, slots=True)
 class AlertPolicy:
@@ -31,6 +42,16 @@ class AlertPolicy:
     cooldown: timedelta = timedelta(hours=6)
     max_per_run: int = 25
     quiet_hours_utc: tuple[int, int] | None = None  # (start, end)
+
+    #: Families that never alert. See MUTED_FAMILIES for the reasoning.
+    muted_families: frozenset[str] = MUTED_FAMILIES
+    #: Hard backstop on delivered alerts per day. If a change ever makes a family
+    #: chatty, this bounds the damage to your attention before you notice.
+    #: Critical-risk alerts are exempt — a cap must not suppress a warning.
+    max_alerts_per_day: int = 6
+
+    def is_muted(self, family: str) -> bool:
+        return family in self.muted_families
 
     def in_quiet_hours(self, at: datetime) -> bool:
         if self.quiet_hours_utc is None:
@@ -46,6 +67,8 @@ class DispatchResult:
     suppressed_duplicate: int = 0
     suppressed_cooldown: int = 0
     suppressed_threshold: int = 0
+    suppressed_muted: int = 0
+    suppressed_daily_cap: int = 0
     delivered: int = 0
     withheld_shadow: int = 0
     risk_flagged: int = 0
@@ -117,6 +140,24 @@ class AlertDispatcher:
             return "elevated"
         return "normal"
 
+    def _delivered_today(self, at: datetime) -> int:
+        """Alerts already delivered on the same UTC day.
+
+        Counts deliveries rather than stored signals, so muted and capped
+        signals do not consume the budget they were excluded from.
+        """
+        start = at.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (
+            self.session.execute(
+                select(func.count(SignalRow.id)).where(
+                    SignalRow.delivered.is_(True),
+                    SignalRow.triggered_at >= start,
+                    SignalRow.triggered_at < start + timedelta(days=1),
+                )
+            ).scalar_one()
+            or 0
+        )
+
     async def dispatch(self, signals: list[Signal]) -> DispatchResult:
         result = DispatchResult()
         shadow = not self.settings.notifications_enabled
@@ -175,6 +216,19 @@ class AlertDispatcher:
             )
             self.session.add(row)
             result.persisted += 1
+
+            # Everything above stores the signal. Everything below decides
+            # whether it is worth interrupting someone for — a separate question,
+            # and the reason muted families are still recorded and graded.
+            if self.policy.is_muted(signal.family) and risk_band != "critical":
+                result.suppressed_muted += 1
+                continue
+
+            if risk_band != "critical" and self._delivered_today(signal.triggered_at) >= (
+                self.policy.max_alerts_per_day
+            ):
+                result.suppressed_daily_cap += 1
+                continue
 
             if shadow:
                 result.withheld_shadow += 1

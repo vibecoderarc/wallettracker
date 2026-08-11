@@ -123,7 +123,12 @@ export const api = {
     get<{ as_of: string; base_rates: Record<string, { rate: number; hits: number; total_assets: number }> }>(
       "/v1/system/base-rates",
     ),
-  signals: (limit = 50) => get<{ signals: Signal[] }>(`/v1/signals?limit=${limit}`),
+  signals: (limit = 50, alertable = false) =>
+    get<{
+      signals: Signal[];
+      muted_families: string[];
+      muted_signal_count: number;
+    }>(`/v1/signals?limit=${limit}&alertable=${alertable}`),
   signal: (id: number) => get<Signal & { evidence: Record<string, unknown>[] }>(`/v1/signals/${id}`),
   candidates: (status?: string) =>
     get<{ candidates: Candidate[] }>(`/v1/candidates${status ? `?status=${status}` : ""}`),
