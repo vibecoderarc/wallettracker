@@ -194,6 +194,151 @@ def digest() -> None:
 
 
 @app.command()
+def smoke() -> None:
+    """Check the live providers actually work, before spending a sweep.
+
+    The development sandbox blocks outbound traffic, so neither live provider
+    has ever been exercised against its real API — only against recorded
+    response shapes. Run this first, from somewhere with network access, so a
+    changed payload format is a five-request discovery instead of a failed
+    sweep that already spent its allowance.
+    """
+    import os
+
+    from alphagraph.providers.geckoterminal import GeckoTerminalProvider
+    from alphagraph.providers.helius import HeliusChainProvider
+
+    settings = get_settings()
+    api_key = settings.solana_indexer_key or os.environ.get("HELIUS_API_KEY", "")
+
+    async def run() -> None:
+        ok = True
+
+        console.print("[bold]1. GeckoTerminal (keyless)[/bold]")
+        market = GeckoTerminalProvider()
+        try:
+            pools = await market.top_pools(pages=1)
+            console.print(f"   pools parsed: {len(pools)}")
+            if not pools:
+                ok = False
+                console.print("   [red]no pools parsed — the payload shape has changed[/red]")
+            else:
+                for pool in pools[:3]:
+                    console.print(
+                        f"   - {(pool.symbol or '?')[:12]:12} {pool.token_address[:18]}… "
+                        f"liq={pool.reserve_usd}"
+                    )
+                candles = await market.pool_candles(pools[0].pool_address)
+                console.print(f"   candles for first pool: {len(candles)}")
+                if candles:
+                    console.print(
+                        f"   range {candles[0].start.date()} -> {candles[-1].start.date()}"
+                    )
+                else:
+                    ok = False
+                    console.print("   [red]no candles — OHLCV shape has changed[/red]")
+        except Exception as exc:
+            ok = False
+            console.print(f"   [red]FAILED: {type(exc).__name__}: {str(exc)[:200]}[/red]")
+
+        console.print("\n[bold]2. Helius[/bold]")
+        if not api_key:
+            console.print("   [yellow]skipped: ALPHAGRAPH_SOLANA_INDEXER_KEY not set[/yellow]")
+        else:
+            chain = HeliusChainProvider(api_key)
+            try:
+                health = await chain.health()
+                console.print(f"   health: {'ok' if health.healthy else health.detail}")
+                # A high-traffic account, used only to confirm parsing works.
+                probe = "So11111111111111111111111111111111111111112"
+                raw = await chain._page(probe, None)
+                console.print(f"   transactions returned: {len(raw)}")
+                parsed = [e for tx in raw for e in chain.parse_transaction(tx, subject=probe)]
+                swaps = sum(1 for e in parsed if e.event_type.value == "swap")
+                unknown = sum(1 for e in parsed if e.event_type.value == "unknown_interaction")
+                console.print(f"   parsed: {swaps} swaps, {unknown} uninterpretable")
+                if parsed:
+                    coverage = swaps / len(parsed)
+                    console.print(f"   parse coverage: {coverage:.0%}")
+                    if coverage < 0.3:
+                        console.print(
+                            "   [yellow]low coverage on this sample — expected for a "
+                            "wrapped-SOL account, worth rechecking on a trader wallet[/yellow]"
+                        )
+                console.print(f"   usage: {chain.usage}")
+            except Exception as exc:
+                ok = False
+                console.print(f"   [red]FAILED: {type(exc).__name__}: {str(exc)[:200]}[/red]")
+
+        console.print()
+        if ok:
+            console.print(
+                "[green]Providers respond and parse. "
+                "Safe to run `alphagraph sweep --estimate`.[/green]"
+            )
+        else:
+            console.print(
+                "[red]Something is wrong above. Do not run a sweep until it is fixed.[/red]"
+            )
+
+    asyncio.run(run())
+
+
+@app.command()
+def sweep(
+    pages: int = typer.Option(5, help="Pages of the token universe to examine"),
+    window_days: int = typer.Option(180, help="How far back to look"),
+    estimate_only: bool = typer.Option(
+        False, "--estimate", help="Report the request cost without spending the Helius allowance"
+    ),
+) -> None:
+    """Phase A: find candidate wallets from real Solana data, starting from none."""
+    import os
+
+    from alphagraph.bootstrap import BootstrapSweep, SweepBudget
+    from alphagraph.providers.geckoterminal import GeckoTerminalProvider
+    from alphagraph.providers.helius import HeliusChainProvider
+
+    settings = get_settings()
+    api_key = settings.solana_indexer_key or os.environ.get("HELIUS_API_KEY", "")
+    if not api_key and not estimate_only:
+        console.print(
+            "[red]No Helius key.[/red] Set ALPHAGRAPH_SOLANA_INDEXER_KEY, "
+            "or use --estimate to price the sweep without one."
+        )
+        raise typer.Exit(1)
+
+    create_all()
+
+    async def run() -> None:
+        market = GeckoTerminalProvider()
+        # Estimation never touches Helius, so a placeholder key is fine there.
+        chain = HeliusChainProvider(api_key or "estimate-only")
+        with session_scope() as session:
+            sweep = BootstrapSweep(session, chain, market, SweepBudget())
+            if estimate_only:
+                console.print("[bold]Estimating cost (no Helius requests)[/bold]")
+                console.print_json(data=await sweep.estimate(pages=pages))
+                return
+            report = await sweep.run(pages=pages, window_days=window_days)
+            console.print_json(data=report.as_dict())
+            if not report.candidates_passed:
+                console.print(
+                    "\n[yellow]No candidates passed.[/yellow] That is a real result, not a "
+                    "failure: the guards require independent events above the base rate, and "
+                    "six months of history limits how much evidence any wallet can accumulate."
+                )
+            if report.parse_coverage < 0.8 and report.events_written:
+                console.print(
+                    f"\n[yellow]Parse coverage {report.parse_coverage:.0%}.[/yellow] "
+                    "A large share of activity could not be interpreted, so these results "
+                    "rest on partial history."
+                )
+
+    asyncio.run(run())
+
+
+@app.command()
 def serve(host: str = "", port: int = 0) -> None:
     """Start the API server.
 
