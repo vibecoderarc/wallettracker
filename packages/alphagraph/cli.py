@@ -19,6 +19,7 @@ from rich.table import Table
 
 from alphagraph.config import get_settings
 from alphagraph.db.session import create_all, session_scope
+from alphagraph.providers.universe import UniverseSource
 from alphagraph.providers.world import WORLD_END, WORLD_START, build_world
 
 app = typer.Typer(help="AlphaGraph — insider footprint intelligence", no_args_is_help=True)
@@ -193,6 +194,27 @@ def digest() -> None:
         console.print_json(data=row.body)
 
 
+def build_market_provider() -> UniverseSource:
+    """The universe source, chosen once so no two commands can disagree.
+
+    Birdeye when a key is configured, GeckoTerminal otherwise. The fallback is
+    kept because it needs no key and still works, but it is a worse universe:
+    it cannot be asked for tokens above a volume threshold, so the floor has to
+    be applied after the fact to whatever the pool listings happened to return.
+    """
+    import os
+
+    from alphagraph.providers.geckoterminal import GeckoTerminalProvider
+
+    settings = get_settings()
+    key = settings.market_data_key or os.environ.get("BIRDEYE_API_KEY", "")
+    if key:
+        from alphagraph.providers.birdeye import BirdeyeProvider
+
+        return BirdeyeProvider(key)
+    return GeckoTerminalProvider()
+
+
 @app.command()
 def smoke() -> None:
     """Check the live providers actually work, before spending a sweep.
@@ -205,7 +227,6 @@ def smoke() -> None:
     """
     import os
 
-    from alphagraph.providers.geckoterminal import GeckoTerminalProvider
     from alphagraph.providers.helius import HeliusChainProvider
 
     settings = get_settings()
@@ -214,29 +235,41 @@ def smoke() -> None:
     async def run() -> None:
         ok = True
 
-        console.print("[bold]1. GeckoTerminal (keyless)[/bold]")
-        market = GeckoTerminalProvider()
+        # Whatever the sweep would use, and the same call the sweep makes.
+        # An earlier version showed `top_pools` instead, which meant it passed
+        # while displaying a universe the sweep never sees.
+        market = build_market_provider()
+        console.print(f"[bold]1. Market data — {market.name}[/bold]")
         try:
-            pools = await market.top_pools(pages=1)
-            console.print(f"   pools parsed: {len(pools)}")
+            pools = await market.universe(pages=1)
+            console.print(f"   universe entries parsed: {len(pools)}")
             if not pools:
                 ok = False
-                console.print("   [red]no pools parsed — the payload shape has changed[/red]")
+                console.print("   [red]empty universe — the payload shape has changed[/red]")
             else:
-                for pool in pools[:3]:
+                for pool in pools[:5]:
                     console.print(
                         f"   - {(pool.symbol or '?')[:12]:12} {pool.token_address[:18]}… "
-                        f"liq={pool.reserve_usd}"
+                        f"liq={pool.reserve_usd} vol24h={pool.volume_24h_usd}"
                     )
                 candles = await market.pool_candles(pools[0].pool_address)
-                console.print(f"   candles for first pool: {len(candles)}")
+                console.print(f"   candles for first entry: {len(candles)}")
                 if candles:
+                    span = (candles[-1].start - candles[0].start).days
                     console.print(
-                        f"   range {candles[0].start.date()} -> {candles[-1].start.date()}"
+                        f"   range {candles[0].start.date()} -> {candles[-1].start.date()} "
+                        f"({span} days)"
                     )
+                    if span < 30:
+                        ok = False
+                        console.print(
+                            "   [red]under a month of history — the sweep looks back six "
+                            "months, so most outcomes would be invisible[/red]"
+                        )
                 else:
                     ok = False
                     console.print("   [red]no candles — OHLCV shape has changed[/red]")
+                console.print(f"   usage: {market.usage}")
         except Exception as exc:
             ok = False
             console.print(f"   [red]FAILED: {type(exc).__name__}: {str(exc)[:200]}[/red]")
@@ -296,7 +329,6 @@ def sweep(
     import os
 
     from alphagraph.bootstrap import BootstrapSweep, SweepBudget
-    from alphagraph.providers.geckoterminal import GeckoTerminalProvider
     from alphagraph.providers.helius import HeliusChainProvider
 
     settings = get_settings()
@@ -311,7 +343,7 @@ def sweep(
     create_all()
 
     async def run() -> None:
-        market = GeckoTerminalProvider()
+        market = build_market_provider()
         # Estimation never touches Helius, so a placeholder key is fine there.
         chain = HeliusChainProvider(api_key or "estimate-only")
         with session_scope() as session:

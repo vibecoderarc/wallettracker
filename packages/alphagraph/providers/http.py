@@ -87,7 +87,12 @@ class HttpClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def get_json(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         """GET returning parsed JSON, with backoff on transient failures.
 
         Raises on non-retryable errors rather than returning a partial result:
@@ -101,7 +106,7 @@ class HttpClient:
             await self.limiter.wait()
             self.meter.requests += 1
             try:
-                response = await self._client.get(url, params=params)
+                response = await self._client.get(url, params=params, headers=headers)
             except httpx.HTTPError as exc:
                 self.meter.errors += 1
                 if attempt >= self.max_retries:
