@@ -42,8 +42,15 @@ async function get<T>(path: string): Promise<T> {
       headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
     });
   } catch {
+    // Two very different situations produce this, and telling a deployed user
+    // to run a local command — as this once did — sends them nowhere.
+    const local = /localhost|127\.0\.0\.1/.test(BASE);
     throw new ApiUnavailable(
-      `Cannot reach the AlphaGraph API at ${BASE}. Start it with \`alphagraph serve\`.`,
+      local
+        ? `Cannot reach the AlphaGraph API at ${BASE}. Start it with \`alphagraph serve\`.`
+        : `Cannot reach the AlphaGraph API at ${BASE}. If that address looks wrong, ` +
+          `set ALPHAGRAPH_API_URL on this service to the API's public URL ` +
+          `(https://<your-api-service>.onrender.com) and redeploy.`,
     );
   }
   if (response.status === 401 || response.status === 403) {

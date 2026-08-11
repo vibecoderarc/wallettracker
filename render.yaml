@@ -28,6 +28,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      # Pinned so the private-network address the dashboard uses is
+      # deterministic. `alphagraph serve` binds whatever $PORT says.
+      - key: PORT
+        value: "10000"
       # Anything other than "local" makes the API token mandatory — Settings
       # refuses to boot without one rather than starting wide open.
       - key: ALPHAGRAPH_ENVIRONMENT
@@ -77,14 +81,17 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-      # Render supplies a bare hostname here, with no scheme. The API client
-      # normalises that (see apps/web/lib/api.ts) — fetch rejects a URL without
-      # one, so do not assume this value is directly usable.
+      # Set explicitly rather than derived. Both `fromService` properties were
+      # tried against a real deployment: `host` and `hostport` each yielded the
+      # bare name "alphagraph-api" — no scheme, no port — which is not an
+      # address anything can connect to.
+      #
+      # This is Render's private-network address; it is deterministic because
+      # the API's PORT is pinned above. If the dashboard reports it cannot reach
+      # the API, override this one variable in the Render UI with the API's
+      # public URL (https://<your-api-service>.onrender.com), which always works.
       - key: ALPHAGRAPH_API_URL
-        fromService:
-          name: alphagraph-api
-          type: web
-          property: host
+        value: http://alphagraph-api:10000
       # Same generated token as the API. Note the name has NO NEXT_PUBLIC_
       # prefix — that would inline it into the browser bundle and hand the
       # token to every visitor.
