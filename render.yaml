@@ -3,7 +3,7 @@
 # Three services and a database:
 #   alphagraph-api   FastAPI, the only thing that touches Postgres
 #   alphagraph-web   Next.js dashboard, talks to the API over HTTP
-#   alphagraph-nightly  cron job running the evaluation loop
+#   alphagraph-nightly  cron job: daily collection, then the evaluation loop
 #
 # Secrets are NEVER in this file. Anything marked `sync: false` must be entered
 # in the Render dashboard; anything with `generateValue: true` Render creates
@@ -110,7 +110,12 @@ services:
     # 07:00 UTC daily. Render cron is UTC — convert from your local time.
     schedule: "0 7 * * *"
     buildCommand: pip install -e ".[postgres]"
-    startCommand: alphagraph nightly
+    # Collect first, then evaluate. The nightly loop grades signals against
+    # what actually happened, so it should read a database that already has
+    # today's observations rather than yesterday's. A failed collection stops
+    # the run: evaluating on stale data would silently grade against a day
+    # that never got recorded.
+    startCommand: alphagraph collect && alphagraph nightly
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
