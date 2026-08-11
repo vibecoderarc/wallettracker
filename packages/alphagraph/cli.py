@@ -371,6 +371,52 @@ def sweep(
 
 
 @app.command()
+def collect(
+    pages: int = typer.Option(3, help="Pages of the universe listing to pull"),
+    max_observations: int = typer.Option(400, help="Hard cap on price fetches this run"),
+) -> None:
+    """Record today's market state for everything on the watchlist.
+
+    Run this daily. It is the only part of the system that gets better purely
+    by being left alone: each run adds a day of point-in-time history that no
+    provider sells and nobody can revoke.
+
+    The watchlist is sticky on purpose — an asset that cleared the traction
+    floor once keeps being recorded after it goes quiet, because its dead days
+    are the collapse, and a record that only covers the good days is the same
+    survivorship bias that emptied the universe of collapses in the first place.
+    """
+    from alphagraph.collector import CollectorConfig, DailyCollector, archive_span
+
+    create_all()
+
+    async def run() -> None:
+        market = build_market_provider()
+        config = CollectorConfig(universe_pages=pages, max_observations=max_observations)
+        with session_scope() as session:
+            collector = DailyCollector(session, market, config)
+            report = await collector.run()
+            console.print_json(data=report.as_dict())
+
+            span = archive_span(session)
+            console.print(f"\n[bold]archive span: {span.days} days[/bold]")
+            if span.days < 30:
+                console.print(
+                    "[yellow]The archive is still shallow.[/yellow] Discovery needs weeks "
+                    "of accumulated history before a wallet can build enough independent "
+                    "evidence to pass the guards. This grows on its own."
+                )
+            if report.skipped_for_budget:
+                console.print(
+                    f"[yellow]{report.skipped_for_budget} watched assets went unobserved "
+                    "today.[/yellow] Raise --max-observations, or these become gaps that "
+                    "will look like real quiet periods later."
+                )
+
+    asyncio.run(run())
+
+
+@app.command()
 def serve(host: str = "", port: int = 0) -> None:
     """Start the API server.
 

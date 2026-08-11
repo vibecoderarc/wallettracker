@@ -383,6 +383,77 @@ class Digest(Base, TimestampMixin):
     body: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class WatchedAsset(Base, TimestampMixin):
+    """An asset the daily collector keeps observing, and why.
+
+    The watchlist is deliberately *sticky*. An asset joins on the day it is
+    first seen and, once it has cleared the traction floor even once, it is
+    never retired — because the days that matter most are the ones after it
+    stops being interesting to a volume-sorted listing.
+
+    Dropping an asset when it goes quiet would rebuild the survivorship problem
+    inside our own archive: we would hold a record of every token on the days it
+    was big, and no record at all of any collapse. `rug_or_collapse` is the
+    outcome class that separates a wallet early into things that last from one
+    early into things that die, so losing it costs more than the storage.
+    """
+
+    __tablename__ = "watched_assets"
+
+    asset_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    #: How the market provider addresses this asset's price series.
+    series_key: Mapped[str] = mapped_column(String(80))
+    symbol: Mapped[str | None] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(String(40), default="")
+
+    #: When *we* first recorded it. Not when it was created on chain — that is
+    #: on `Asset.first_seen_at` and may be unknown.
+    first_watched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    #: The first day it cleared the traction floor. None means never; such an
+    #: asset is a retirement candidate, a qualified one never is.
+    qualified_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+
+    last_observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+    peak_volume_24h_usd: Mapped[Decimal] = mapped_column(Numeric(38, 6), default=Decimal(0))
+    #: Consecutive collection days below the "anyone could trade this" line.
+    quiet_days: Mapped[int] = mapped_column(Integer, default=0)
+    retired_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
+
+
+class AssetObservation(Base):
+    """One day's market state for one asset, stamped with when we saw it.
+
+    This is the archive no provider sells: a point-in-time record built forward
+    from the day collection starts. `observed_at` is our clock, and every
+    analytic filters on it, so a value written today can never leak into a
+    backtest of last month.
+    """
+
+    __tablename__ = "asset_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[str] = mapped_column(String(80), index=True)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    #: Collection day as YYYY-MM-DD. Carries the idempotency: re-running the
+    #: collector on the same day overwrites rather than duplicating.
+    observed_on: Mapped[str] = mapped_column(String(10), index=True)
+
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 18))
+    liquidity_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6))
+    volume_24h_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6))
+    market_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(38, 6))
+    #: True when the asset was in today's listing; False when we only kept
+    #: observing it because it is on the watchlist. The difference is exactly
+    #: what a survivor-selected universe would have thrown away.
+    in_universe: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(40), default="")
+
+    __table_args__ = (
+        UniqueConstraint("asset_id", "observed_on", name="uq_observation_asset_day"),
+        Index("ix_observation_asset_time", "asset_id", "observed_at"),
+    )
+
+
 class CostLedger(Base):
     __tablename__ = "cost_ledger"
 
