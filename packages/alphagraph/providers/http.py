@@ -73,7 +73,7 @@ class HttpClient:
         base_url: str = "",
         requests_per_second: float = 8.0,
         timeout: float = 30.0,
-        max_retries: int = 4,
+        max_retries: int = 6,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.meter = UsageMeter(provider=provider)
@@ -113,6 +113,12 @@ class HttpClient:
             if response.status_code in RETRY_STATUS:
                 if response.status_code == 429:
                     self.meter.rate_limited += 1
+                    # A server that states how long to wait is obeyed. Only when
+                    # it says nothing do we escalate: a minute-window limiter
+                    # keeps refusing until the window rolls, and small delays
+                    # just burn the remaining attempts on further refusals.
+                    if self._retry_after(response) is None:
+                        delay = max(delay, 20.0)
                 if attempt >= self.max_retries:
                     raise ProviderRequestError(
                         f"{self.meter.provider}: {response.status_code} after "
@@ -148,7 +154,10 @@ class HttpClient:
 
     @staticmethod
     async def _backoff(seconds: float) -> None:
-        await asyncio.sleep(min(seconds, 30.0))
+        # Cap generously. A public tier that limits per MINUTE needs a wait
+        # measured in tens of seconds; backing off for two and retrying just
+        # spends another request on a refusal.
+        await asyncio.sleep(min(seconds, 75.0))
 
 
 class ProviderRequestError(RuntimeError):

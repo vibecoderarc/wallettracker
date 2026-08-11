@@ -129,8 +129,8 @@ class TestUniverseIncludesLosers:
                             "id": f"solana_{POOL}",
                             "attributes": {
                                 "address": POOL,
-                                "name": "DUD / SOL",
-                                "reserve_in_usd": "1000",
+                                "name": "DUD / SOL",  # real liquidity, flat price
+                                "reserve_in_usd": "250000",
                                 "volume_usd": {"h24": "10"},
                                 "pool_created_at": "2026-05-01T00:00:00Z",
                             },

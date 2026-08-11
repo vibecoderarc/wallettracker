@@ -25,6 +25,13 @@ from alphagraph.providers.base import Candle, MarketDataProvider
 
 DEFINITION_VERSION = "v1"
 
+#: Volume thresholds are PER CANDLE, so they depend on the candle size. The
+#: defaults below are tuned for hourly data. Live sweeps use daily candles —
+#: one request covers months instead of days — and a day's volume is orders of
+#: magnitude larger than an hour's, so the hourly floors would wave through
+#: illiquid noise. `daily_configs()` supplies the scaled versions.
+HOURS_PER_DAY = 24
+
 #: How long after t0 the system is assumed to have confirmed the outcome. A
 #: price run is only knowable after the window closes, so the registry must not
 #: pretend it was observable at t0 itself.
@@ -207,6 +214,32 @@ def detect_pump_event(
             "collapse_outcome_id": collapse.outcome_id,
             "hours_to_collapse": str(round(gap.total_seconds() / 3600, 1)),
         },
+    )
+
+
+def daily_configs() -> tuple[PriceRunConfig, RevivalConfig, CollapseConfig]:
+    """Detector settings for daily candles.
+
+    Volume floors are raised roughly in proportion to the candle size, so a
+    "10x" on a pool doing a few hundred dollars a day is rejected the same way
+    it would be on hourly data. Without this the live universe fills with dust
+    that technically multiplied but that nobody could have traded.
+    """
+    return (
+        PriceRunConfig(
+            multiple=Decimal("3"),
+            horizon=timedelta(days=30),
+            baseline_window=timedelta(days=7),
+            min_baseline_volume_usd=Decimal("25000"),
+        ),
+        RevivalConfig(
+            dormant_days=45,
+            dormant_max_avg_volume_usd=Decimal("10000"),
+            wake_multiple=Decimal("4"),
+            wake_window=timedelta(days=14),
+            accumulation_gap_days=32,
+        ),
+        CollapseConfig(drawdown_from_peak=Decimal("0.85"), window=timedelta(days=14)),
     )
 
 
