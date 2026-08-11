@@ -62,6 +62,17 @@ log = logging.getLogger(__name__)
 #: widest lookback window; fetching more would cost requests the engine ignores.
 LOOKBACK = timedelta(days=30)
 
+#: Was this token ever tradable? Judged on the busiest day in its history, not
+#: on what it holds now.
+#:
+#: Present-day liquidity is the wrong test for a universe: a token that ran and
+#: then rugged holds nothing today and would be excluded, taking every
+#: `rug_or_collapse` outcome with it — the class that distinguishes a wallet
+#: early into things that last from one early into things that die. Peak
+#: historical volume admits the ones that mattered and were later abandoned,
+#: while still rejecting tokens nobody could ever have traded.
+MIN_PEAK_DAILY_VOLUME_USD = 50_000
+
 
 @dataclass
 class SweepBudget:
@@ -81,6 +92,8 @@ class SweepReport:
     started_at: datetime = field(default_factory=utcnow)
     pools_examined: int = 0
     pools_with_prices: int = 0
+    pools_never_tradable: int = 0
+    pools_dead_but_counted: int = 0
     outcomes_detected: dict[str, int] = field(default_factory=dict)
     outcome_windows_fetched: int = 0
     suspects_found: int = 0
@@ -109,6 +122,8 @@ class SweepReport:
             "started_at": self.started_at.isoformat(),
             "pools_examined": self.pools_examined,
             "pools_with_prices": self.pools_with_prices,
+            "pools_never_tradable": self.pools_never_tradable,
+            "pools_dead_but_counted": self.pools_dead_but_counted,
             "outcomes_detected": self.outcomes_detected,
             "outcome_windows_fetched": self.outcome_windows_fetched,
             "suspects_found": self.suspects_found,
@@ -199,6 +214,20 @@ class BootstrapSweep:
             candles = await self.market.pool_candles(pool.pool_address)
             if not candles:
                 continue
+
+            peak_volume = max((float(c.volume_usd) for c in candles), default=0.0)
+            if peak_volume < MIN_PEAK_DAILY_VOLUME_USD:
+                # Never tradable at any point, so it cannot have produced an
+                # outcome anyone could have acted on.
+                self.report.pools_never_tradable += 1
+                continue
+
+            recent_volume = float(candles[-1].volume_usd)
+            if recent_volume < MIN_PEAK_DAILY_VOLUME_USD * 0.05:
+                # Was tradable once, is dead now. Exactly the case a
+                # present-day liquidity filter would have silently dropped.
+                self.report.pools_dead_but_counted += 1
+
             self.report.pools_with_prices += 1
             self._register_asset(pool, candles[0].start)
 

@@ -45,7 +45,10 @@ class ScriptedTransport(httpx.AsyncBaseTransport):
     """Serves responses by URL substring, so ordering does not matter."""
 
     def __init__(self, routes: dict[str, object]) -> None:
-        self.routes = routes
+        # Longest fragment first: "/pools" is a substring of the OHLCV path
+        # "/pools/{address}/ohlcv/day", so shortest-first matching would serve
+        # the pool listing in response to a candle request.
+        self.routes = dict(sorted(routes.items(), key=lambda kv: len(kv[0]), reverse=True))
         self.calls: list[str] = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -117,8 +120,10 @@ class TestUniverseIncludesLosers:
         makes every wallet's edge vanish — the failure already seen once in the
         fixture world.
         """
+        # Tradable volume, flat price: the denominator case. A token nobody could
+        # ever have traded is excluded instead, and covered separately below.
         flat = [
-            [int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()) + i * 3600, 1, 1, 1, 1, 50]
+            [int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()) + i * 86400, 1, 1, 1, 1, 200_000]
             for i in range(60)
         ]
         market_transport = ScriptedTransport(
@@ -153,7 +158,7 @@ class TestUniverseIncludesLosers:
         fresh_session.flush()
 
         assets = list(fresh_session.execute(select(Asset)).scalars())
-        assert len(assets) == 1, "a flat token must still enter the universe"
+        assert len(assets) == 1, "a tradable but flat token must still enter the universe"
         assert sweep.report.outcomes_detected == {}
 
 
@@ -251,3 +256,90 @@ class TestCoverageReporting:
         payload = SweepReport().as_dict()
         for key in ("parse_coverage", "base_rate", "truncated", "provider_usage"):
             assert key in payload
+
+
+class TestSurvivorshipInTheUniverse:
+    """A universe selected on being alive today is survivor-biased at the root.
+
+    Every guard in the discovery engine compares a wallet against a population
+    base rate. If the population only contains tokens that survived, the base
+    rate is wrong and so is every edge computed from it — and `rug_or_collapse`,
+    the class separating "early into things that last" from "early into things
+    that die", would be empty.
+    """
+
+    def _sweep_with_candles(self, session, volumes: list[float]):
+        base = int(datetime(2026, 3, 1, tzinfo=UTC).timestamp())
+        rows = [[base + i * 86400, 1, 1, 1, 1, v] for i, v in enumerate(volumes)]
+        market_transport = ScriptedTransport(
+            {
+                "/pools": {
+                    "data": [
+                        {
+                            "id": f"solana_{POOL}",
+                            "attributes": {
+                                "address": POOL,
+                                "name": "TOKEN / SOL",
+                                "reserve_in_usd": "500000",
+                                "volume_usd": {"h24": "100"},
+                                "pool_created_at": "2026-03-01T00:00:00Z",
+                            },
+                            "relationships": {"base_token": {"data": {"id": f"solana_{MEME}"}}},
+                        }
+                    ]
+                },
+                "/ohlcv/": {"data": {"attributes": {"ohlcv_list": rows}}},
+            }
+        )
+        market = GeckoTerminalProvider(
+            client=_client("gecko", "https://api.geckoterminal.com/api/v2", market_transport)
+        )
+        chain = HeliusChainProvider(
+            "k", client=_client("helius", "https://api.helius.xyz", ScriptedTransport({}))
+        )
+        return BootstrapSweep(session, chain, market)
+
+    def test_a_token_that_ran_then_died_stays_in_the_universe(self, fresh_session):
+        """The rugged case. Present-day liquidity would have excluded it."""
+        # Busy for a month, then abandoned.
+        volumes = [500_000.0] * 30 + [10.0] * 60
+        sweep = self._sweep_with_candles(fresh_session, volumes)
+
+        asyncio.run(sweep.build_universe(pages=1))
+        fresh_session.flush()
+
+        assert fresh_session.execute(select(Asset)).scalars().all(), (
+            "a token that ran and then died must remain in the universe"
+        )
+        assert sweep.report.pools_dead_but_counted == 1
+        assert sweep.report.pools_never_tradable == 0
+
+    def test_a_token_nobody_could_ever_trade_is_excluded(self, fresh_session):
+        """Dust throughout its life cannot produce an actionable outcome."""
+        sweep = self._sweep_with_candles(fresh_session, [12.0] * 90)
+
+        asyncio.run(sweep.build_universe(pages=1))
+        fresh_session.flush()
+
+        assert fresh_session.execute(select(Asset)).scalars().all() == []
+        assert sweep.report.pools_never_tradable == 1
+
+    def test_new_pools_are_fetched_without_a_liquidity_floor(self):
+        """Rugged tokens hold nothing now; filtering on that erases them."""
+        import inspect
+
+        from alphagraph.providers.geckoterminal import GeckoTerminalProvider as GTP
+
+        source = inspect.getsource(GTP.new_pools)
+        assert "min_liquidity" not in source, (
+            "new_pools must not apply a present-day liquidity filter"
+        )
+
+    def test_universe_draws_from_all_three_listings(self):
+        import inspect
+
+        from alphagraph.providers.geckoterminal import GeckoTerminalProvider as GTP
+
+        source = inspect.getsource(GTP.universe)
+        for listing in ("top_pools", "trending", "new_pools"):
+            assert listing in source

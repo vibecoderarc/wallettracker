@@ -146,17 +146,52 @@ class GeckoTerminalProvider(MarketDataProvider):
                 pools.append(pool)
         return pools
 
-    async def universe(self, pages: int = 3) -> list[PoolRef]:
-        """Combine listings so the universe is not only what is hot right now.
+    async def new_pools(self, pages: int = 5) -> list[PoolRef]:
+        """Recently created pools, ordered by age rather than by current size.
 
-        Top-by-volume supplies established tokens; trending supplies the ones
-        currently moving. Both are needed: only-trending is survivorship, and
-        only-established misses the launches this system exists to catch.
+        This is the only listing that reaches tokens which have since died. It
+        is fetched WITHOUT the liquidity floor on purpose: a rugged token holds
+        nothing today, and filtering on present-day liquidity would remove every
+        collapse from the record.
+        """
+        pools: list[PoolRef] = []
+        seen: set[str] = set()
+        for page in range(1, pages + 1):
+            payload = await self._http.get_json("/networks/solana/new_pools", {"page": page})
+            for item in self._items(payload):
+                pool = self._parse_pool(item)
+                if pool is None or pool.pool_address in seen:
+                    continue
+                seen.add(pool.pool_address)
+                pools.append(pool)
+        return pools
+
+    async def universe(self, pages: int = 3) -> list[PoolRef]:
+        """Assemble a universe that is not selected on being alive today.
+
+        Three listings, for three different reasons:
+
+          * **top by volume** — established tokens with real trading
+          * **trending** — what is moving right now
+          * **new pools** — recently created, INCLUDING the ones that have since
+            died, and deliberately exempt from the liquidity floor
+
+        Only the first two would produce a universe of survivors. A token that
+        ran in March and is a corpse today has no volume and no liquidity, so it
+        would be filtered out — and with it every `rug_or_collapse` outcome, the
+        class that separates "early into things that last" from "early into
+        things that die".
+
+        Selecting a universe on current success is the same survivorship trap the
+        detectors guard against; it just enters through the universe instead of
+        the outcome definitions.
         """
         established = await self.top_pools(pages=pages, trending=False)
         hot = await self.top_pools(pages=1, trending=True)
+        recent = await self.new_pools(pages=pages)
+
         merged: dict[str, PoolRef] = {p.pool_address: p for p in established}
-        for pool in hot:
+        for pool in (*hot, *recent):
             merged.setdefault(pool.pool_address, pool)
         return list(merged.values())
 
